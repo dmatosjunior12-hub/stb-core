@@ -1,0 +1,31 @@
+Tem. Cole este conteúdo — mas antes corrija o `[SEU-USUARIO]` no `Cargo.toml` que já commitou: na linha 8, troque por `dmatosjunior12-hub`.
+
+Para o `CITATION.cff`, crie o arquivo e cole:
+
+```yaml
+cff-version: 1.2.0
+title: STB-Core
+message: "If you use this software, please cite both the software and the paper."
+type: software
+authors:
+  - family-names: Matos Junior
+    given-names: Daniel da Silva
+    email: d.matosjunior12@gmail.com
+version: 0.2.0
+date-released: 2026-06-13
+license: MIT
+repository-code: https://github.com/dmatosjunior12-hub/stb-core
+abstract: >
+  Reference implementation of Structural Generative Transmission (STB),
+  a bio-inspired framework for transmitting generative instructions
+  instead of raw data. Covers layers C1–C4 and the STB Virtual Machine.
+references:
+  - type: article
+    title: "Structural Generative Transmission (STB): A Bio-Inspired Framework
+      for Transmitting Generative Instructions Instead of Raw Data"
+    authors:
+      - family-names: Matos Junior
+        given-names: Daniel da Silva
+    year: 2026
+    doi: 10.5281/zenodo.20528475
+```
