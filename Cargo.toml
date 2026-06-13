@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Daniel da Silva Matos Júnior <d.matosjunior12@gmail.com>"]
 description = "Reference implementation of Structural Generative Transmission (STB) framework"
 license = "MIT"
-repository = "https://github.com/[SEU-USUARIO]/stb-core"
+repository = "https://github.com/dmatosjunior12-hub/stb-core"
 keywords = ["compression", "generative", "bio-inspired", "virtual-machine", "codec"]
 categories = ["compression", "encoding"]
 
