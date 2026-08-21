@@ -10,6 +10,10 @@ a bio-inspired framework for transmitting generative instructions instead of raw
 > Matos Júnior, D. (2026). *Structural Generative Transmission (STB)*.
 > Zenodo. https://doi.org/10.5281/zenodo.20528475
 
+> Matos Júnior, D. (2026). *Structural Generative Transmission (STB) — Part II: 
+> Bio-Inspired Architectural Extensions as a Disciplined Research Program* (Version 1.2).
+> Zenodo. https://doi.org/10.5281/zenodo.22045957
+
 ## What this implements
 
 | Layer | Component | Status |
