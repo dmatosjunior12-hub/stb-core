@@ -145,5 +145,93 @@ class LibraryTests(unittest.TestCase):
         self.assertNotIn(stb_codec.LOCAL_ID, "".join(ids))
 
 
+class CopyTests(unittest.TestCase):
+    """Extensão COPY (benchmark): cópia intra-arquivo, ativa só com resíduo."""
+
+    def test_simple_copy(self):
+        out = stb_vm.execute(stb_vm.enc_res(6) + stb_vm.enc_copy(6, 4) + stb_vm.STP_BYTES, {},
+                             residue=b"abcdef")
+        self.assertEqual(out, b"abcdefabcd")
+
+    def test_overlapping_copy_repeats_pattern(self):
+        # dist 1, len 5: "a" -> "aaaaaa"; dist 2, len 5 sobre "ab" -> "ababa"
+        out = stb_vm.execute(stb_vm.enc_res(1) + stb_vm.enc_copy(1, 5) + stb_vm.STP_BYTES, {},
+                             residue=b"a")
+        self.assertEqual(out, b"aaaaaa")
+        out = stb_vm.execute(stb_vm.enc_res(2) + stb_vm.enc_copy(2, 5) + stb_vm.STP_BYTES, {},
+                             residue=b"ab")
+        self.assertEqual(out, b"abababa")
+
+    def test_distance_zero_rejected(self):
+        prog = stb_vm.enc_res(1) + stb_vm.enc_copy(0, 1) + stb_vm.STP_BYTES
+        with self.assertRaises(stb_vm.VmError):
+            stb_vm.execute(prog, {}, residue=b"x")
+
+    def test_distance_past_output_rejected(self):
+        prog = stb_vm.enc_res(3) + stb_vm.enc_copy(4, 1) + stb_vm.STP_BYTES
+        with self.assertRaises(stb_vm.VmError):
+            stb_vm.execute(prog, {}, residue=b"abc")
+
+    def test_copy_at_start_rejected(self):
+        prog = stb_vm.enc_copy(1, 1) + stb_vm.STP_BYTES
+        with self.assertRaises(stb_vm.VmError):
+            stb_vm.execute(prog, {}, residue=b"")
+
+    def test_copy_rejected_without_residue(self):
+        prog = stb_vm.enc_res(1) + stb_vm.enc_copy(1, 1) + stb_vm.STP_BYTES
+        with self.assertRaises(stb_vm.VmError):
+            stb_vm.validate_bytecode(prog, allow_residue=False)
+        with self.assertRaises(stb_vm.VmError):
+            stb_vm.execute(prog, {})
+
+    def test_copy_counted_inside_rpt(self):
+        # RPT 3 { COPY dist 1 len 2 } sobre um "z": "z" + 3 * "zz" = 7 bytes de 'z'
+        body = stb_vm.enc_copy(1, 2)
+        prog = stb_vm.enc_res(1) + stb_vm.enc_rpt(3, body) + stb_vm.STP_BYTES
+        self.assertEqual(stb_vm.execute(prog, {}, residue=b"z"), b"z" * 7)
+
+
+class StbV2Tests(unittest.TestCase):
+    def roundtrip(self, data, genes):
+        import stb_v2
+        lib = lib_from(genes)
+        toks, R = stb_v2.tokenize(data, lib)
+        blob = stb_v2.pack_streams(stb_v2.streams_from_tokens(toks, R))
+        s2 = stb_v2.unpack_streams(blob)
+        self.assertEqual(s2, stb_v2.streams_from_tokens(toks, R))
+        prog = stb_v2.bytecode_from_tokens(stb_v2.tokens_from_streams(s2), lib)
+        out = stb_vm.execute(prog, lib.payload, residue=s2["R"])
+        self.assertEqual(out, data)
+        return toks, blob
+
+    def test_empty(self):
+        self.roundtrip(b"", [])
+
+    def test_intra_file_repeat_becomes_copy(self):
+        import stb_v2
+        data = b"0123456789-" * 40
+        toks, _ = self.roundtrip(data, [])
+        self.assertTrue(any(t[0] == stb_v2.T_COPY for t in toks))
+
+    def test_random_bytes_roundtrip(self):
+        data = bytes(random.Random(3).randrange(256) for _ in range(3000))
+        self.roundtrip(data, [])
+
+    def test_gene_and_copy_mixed(self):
+        genes = [b"GENE-SEQUENCE-ABCDEFGH", b"another gene body"]
+        data = b"xx" + genes[0] + b"-yy" + genes[0] + b"-yy" + genes[1] * 4 + b"zzz" * 9
+        self.roundtrip(data, genes)
+
+    def test_tokens_are_valid_stream_types(self):
+        import stb_v2
+        toks, _ = self.roundtrip(b"abcabcabcabcabc" * 5, [])
+        self.assertEqual(toks[-1], (stb_v2.T_STP,))
+
+    def test_bad_stream_method_rejected(self):
+        import stb_v2
+        with self.assertRaises(ValueError):
+            stb_v2.unpack_stream(bytes([9, 0]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

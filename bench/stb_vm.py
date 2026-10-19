@@ -21,6 +21,9 @@ DEF, REF, RPT, RPTEND, ALE, ERR, STP = 0x01, 0x02, 0x03, 0x04, 0x07, 0x08, 0xFF
 # resíduo é fornecido a execute(); com residue=None, a validação se comporta como o Rust.
 RES = 0x09
 RES_OVERHEAD = 5  # 1 (opcode) + 4 (u32 length)
+# EXTENSÃO DO BENCHMARK (v2): COPY dist len copia `len` bytes que começam `dist` bytes atrás
+# na saída já produzida (cópia intra-arquivo, como LZ77). Ativa junto com RES (residue != None).
+COPY = 0x0A
 
 MAX_OUTPUT_SIZE = 64 * 1024 * 1024
 MAX_LOOP_COUNT = 1_000_000
@@ -82,6 +85,10 @@ def enc_ref(gene_id: str) -> bytes:
     return bytes([REF]) + struct.pack("<H", len(idb)) + idb
 
 
+def enc_copy(dist: int, length: int) -> bytes:
+    return bytes([COPY]) + struct.pack("<II", dist, length)
+
+
 def enc_res(n: int) -> bytes:
     return bytes([RES]) + struct.pack("<I", n)
 
@@ -107,6 +114,13 @@ def validate_bytecode(bytes_: bytes, allow_residue: bool = False) -> None:
         pc += 1
         if op == RES and allow_residue:
             _, pc = _u32(bytes_, pc)
+        elif op == COPY and allow_residue:
+            dist, pc = _u32(bytes_, pc)
+            length, pc = _u32(bytes_, pc)
+            if dist == 0:
+                raise VmError("Custom", "COPY distance 0")
+            if length > MAX_OUTPUT_SIZE:
+                raise VmError("Custom", "COPY length exceeds output limit")
         elif op == DEF:
             _, pc = _str(bytes_, pc)
             _, pc = _blob(bytes_, pc)
@@ -166,6 +180,18 @@ def execute(bytes_: bytes, library: dict, residue: bytes = None) -> bytes:
                 raise VmError("OutOfBounds", "resíduo insuficiente")
             out += residue[rp:rp + n]
             rp += n
+        elif op == COPY:
+            dist, pc = _u32(bytes_, pc)
+            length, pc = _u32(bytes_, pc)
+            if dist == 0 or dist > len(out):
+                raise VmError("Custom", f"COPY distance {dist} fora da saída ({len(out)} bytes)")
+            if len(out) + length > MAX_OUTPUT_SIZE:
+                raise VmError("Custom", "Output size limit exceeded")
+            start = len(out) - dist
+            if dist >= length:
+                out += out[start:start + length]
+            else:  # sobreposição: repete o padrão de `dist` bytes
+                out += (out[start:] * (length // dist + 1))[:length]
         elif op == DEF:
             gid, pc = _str(bytes_, pc)
             data, pc = _blob(bytes_, pc)
@@ -206,6 +232,9 @@ def execute(bytes_: bytes, library: dict, residue: bytes = None) -> bytes:
                             _, pc = _u64(bytes_, pc)
                             _, pc = _u32(bytes_, pc)
                         elif o == RES:
+                            _, pc = _u32(bytes_, pc)
+                        elif o == COPY:
+                            _, pc = _u32(bytes_, pc)
                             _, pc = _u32(bytes_, pc)
             else:
                 stack.append([pc, count - 1])

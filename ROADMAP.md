@@ -21,6 +21,8 @@
 - [ ] Content-defined chunking backend (FastCDC integration)
 - [x] Benchmark framework against DEFLATE / zstd (`bench/`); H.264 ainda pendente
 - [ ] Baseline de vídeo (H.264) no benchmark
+- [ ] STB-v2 superar zstd-19: parsing ótimo (em vez de guloso) e codificação entrópica real dos fluxos (hoje: LZMA/zstd por fluxo). O resultado atual fica abaixo do zstd-19 em todas as famílias.
+- [ ] Decidir se COPY e a separação em fluxos entram no formato Rust (hoje são só do benchmark)
 - [x] Measurement of ρ_STB on real data (logs, código, CSV, .pyc; ver `bench/RESULTS.md`): o formato atual fica abaixo do zstd
 - [ ] Encoder com REF a bytes já emitidos (in-file), a maior lacuna medida
 

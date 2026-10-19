@@ -65,10 +65,11 @@ let output = vm.execute_bytecode(&bytecode).unwrap();
 
 ## Benchmark
 
-`bench/` compara o formato STB com DEFLATE e zstd em dados reais (logs do Loghub, CSVs,
-código e `.pyc` da stdlib), contando a biblioteca de genes no custo e treinando-a só com
-dados de treino. Resultado atual: o formato ainda fica bem abaixo do zstd-19, mesmo com a
-extensão de resíduo comprimido. Detalhes e limitações em [`bench/RESULTS.md`](bench/RESULTS.md).
+`bench/` compara o formato STB com DEFLATE, xz e zstd em dados reais (logs do Loghub, CSVs,
+código e `.pyc` da stdlib), contando a biblioteca de genes (comprimida) no custo e treinando-a só
+com dados de treino. Resultado atual: nem o STB atual, nem as variantes com resíduo comprimido
+(STB+Ω) e com COPY (STB-v2) superam o zstd-19 sem dicionário em nenhuma família estruturada.
+Detalhes e limitações em [`bench/RESULTS.md`](bench/RESULTS.md).
 
 ```bash
 pip install -r bench/requirements.txt

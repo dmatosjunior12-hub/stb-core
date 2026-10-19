@@ -23,3 +23,4 @@ target
 # Benchmark (bench/): corpus e resultados brutos ficam fora do Git
 bench/data/
 __pycache__/
+bench/results/

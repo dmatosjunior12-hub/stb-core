@@ -2,16 +2,22 @@
 
 Métodos:
   zlib-9        DEFLATE nível 9 (sem dicionário)
+  xz-9e         xz/LZMA2 preset 9 extremo (sem dicionário)
   zstd-19       zstd nível 19 (sem dicionário)
   zstd-19+dict  zstd nível 19 com dicionário treinado (orçamento 110 KiB)
   STB           encoder de bench/stb_codec.py com biblioteca Γ treinada (orçamento 110 KiB);
                 literais crus no programa (formato atual do STB-Core)
   STB+Ω         mesmo encoder, mas os literais vão para um resíduo Ω comprimido com zstd-19
                 e o programa usa RES n. RES NÃO existe no STB-Core: é extensão proposta.
+  STB-v2 sem Γ  bench/stb_v2.py: tokens LIT/REF/RPT/COPY/STP, fluxos separados, cada fluxo
+                com o melhor entre cru/LZMA2/zstd-19. COPY e RES são extensões do benchmark.
+  STB-v2 com Γ  mesmo, com a biblioteca Γ do treino (orçamento 110 KiB).
 
-Contabilidade (a biblioteca/dicionário é SEMPRE contado):
+Contabilidade (a biblioteca/dicionário é SEMPRE contado, em forma comprimida):
   isolado    cada arquivo é transmitido sozinho; o dicionário/Γ é pago em cada arquivo.
   amortizado o dicionário/Γ é pago uma vez para a família (receptor já o possui).
+  custo de Γ/dicionário = min(bytes crus, LZMA2 raw 9e). Aplicado igualmente ao dicionário
+  zstd e a Γ, para que nenhum dos dois seja favorecido pela forma de armazenamento.
 
 Para STB, o custo por arquivo é P (programa) + C (cabeçalho fixo de 40 bytes) [+ Γ].
 Round-trip é verificado para todos os arquivos de todos os métodos.
@@ -20,6 +26,7 @@ Uso:  python3 bench/run_benchmark.py     (requer: zstandard, numpy; ver requirem
 """
 
 import json
+import lzma
 import platform
 import statistics
 import sys
@@ -33,6 +40,7 @@ import zstandard
 
 import build_corpus
 import stb_codec
+import stb_v2
 import stb_vm
 
 HERE = Path(__file__).resolve().parent
@@ -71,6 +79,39 @@ def train_zstd_dict(train_bytes, budget=BUDGET):
         return None
 
 
+def charged(raw: bytes) -> int:
+    """Custo de transmitir um dicionário/biblioteca: min(cru, LZMA2 raw 9e)."""
+    lz = lzma.compress(raw, format=lzma.FORMAT_RAW, filters=stb_v2.LZMA_FILTERS)
+    return min(len(raw), len(lz))
+
+
+def gamma_charge(lib: stb_codec.Library):
+    """Retorna (tamanho cru serializado de Γ, custo cobrado de Γ)."""
+    raw = lib.serialized_size()
+    return raw, min(raw, charged(lib.as_program()))
+
+
+def bench_stb_v2(test, lib, gamma_cost, n):
+    """STB-v2: tokenização, fluxos comprimidos, desempacotamento e execução pela VM."""
+    t = time.perf_counter()
+    sizes, fails = [], 0
+    for name, b in test:
+        toks, R = stb_v2.tokenize(b, lib)
+        blob = stb_v2.pack_streams(stb_v2.streams_from_tokens(toks, R))
+        try:
+            s2 = stb_v2.unpack_streams(blob)
+            prog = stb_v2.bytecode_from_tokens(stb_v2.tokens_from_streams(s2), lib)
+            if stb_vm.execute(prog, lib.payload, residue=s2["R"]) != b:
+                fails += 1
+        except (stb_vm.VmError, ValueError, IndexError) as exc:
+            print(f"    [falha] STB-v2 {name}: {exc}")
+            fails += 1
+        sizes.append(len(blob))
+    payload = sum(sizes) + stb_codec.CAPSID_BYTES * n
+    return {"iso": payload + gamma_cost * n, "amort": payload + gamma_cost, "payload": payload,
+            "fail": fails, "time_s": time.perf_counter() - t}
+
+
 def bench_family(family):
     train = [b for _, b in load(family, "train")]
     test = load(family, "test")
@@ -101,6 +142,17 @@ def bench_family(family):
     res["methods"]["zstd-19"] = {"iso": sum(sizes), "amort": sum(sizes), "payload": sum(sizes),
                                  "fail": fails, "time_s": time.perf_counter() - t}
 
+    # ---- xz-9e (LZMA2, sem dicionário)
+    t = time.perf_counter()
+    sizes, fails = [], 0
+    for name, b in test:
+        c = lzma.compress(b, format=lzma.FORMAT_XZ, preset=9 | lzma.PRESET_EXTREME)
+        if lzma.decompress(c) != b:
+            fails += 1
+        sizes.append(len(c))
+    res["methods"]["xz-9e"] = {"iso": sum(sizes), "amort": sum(sizes), "payload": sum(sizes),
+                               "fail": fails, "time_s": time.perf_counter() - t}
+
     # ---- zstd-19 + dicionário
     zdict = train_zstd_dict(train)
     if zdict is not None:
@@ -113,10 +165,10 @@ def bench_family(family):
             if ddict.decompress(c) != b:
                 fails += 1
             sizes.append(len(c))
-        D = len(zdict)
+        D_raw, D = len(zdict), charged(zdict)
         res["methods"]["zstd-19+dict"] = {
             "iso": sum(sizes) + D * n, "amort": sum(sizes) + D, "payload": sum(sizes), "fail": fails,
-            "time_s": time.perf_counter() - t, "dict_bytes": D,
+            "time_s": time.perf_counter() - t, "dict_bytes": D_raw, "dict_charged_bytes": D,
         }
     else:
         res["methods"]["zstd-19+dict"] = None
@@ -126,8 +178,8 @@ def bench_family(family):
     genes = stb_codec.build_library(train, BUDGET)
     lib = stb_codec.Library(genes)
     build_s = time.perf_counter() - t_build
-    G = lib.serialized_size()
-    gene_info = {"gamma_bytes": G, "genes": len(genes), "build_s": build_s}
+    G_raw, G = gamma_charge(lib)
+    gene_info = {"gamma_bytes": G_raw, "gamma_charged_bytes": G, "genes": len(genes), "build_s": build_s}
 
     t = time.perf_counter()
     sizes, fails, ref_bytes, lit_bytes, genes_used = [], 0, 0, 0, []
@@ -178,6 +230,11 @@ def bench_family(family):
         **gene_info,
         "residue_share": sum(o_sizes) / orig_total if orig_total else 0.0,
     }
+
+    # ---- STB-v2 sem Γ (custo de biblioteca zero) e com Γ (mesma Γ do STB)
+    empty = stb_codec.Library([])
+    res["methods"]["STB-v2 sem Γ"] = bench_stb_v2(test, empty, 0, n)
+    res["methods"]["STB-v2 com Γ"] = {**bench_stb_v2(test, lib, G, n), **gene_info}
     return res
 
 
@@ -185,29 +242,43 @@ def rho(orig, comp):
     return orig / comp if comp else float("inf")
 
 
+STB_VARIANTS = ("STB", "STB+Ω", "STB-v2 sem Γ", "STB-v2 com Γ")
+
+
 def render_summary(results):
     structured = [f for f in results if f != "aleatorio"]
-    wins = 0
+    wins_all, wins_v2 = 0, 0
     lines = ["## Resumo", ""]
     for fam in structured:
         r = results[fam]
         m = r["methods"]
-        z = rho(r["orig_bytes"], m["zstd-19"]["iso"])
-        zd = rho(r["orig_bytes"], m["zstd-19+dict"]["payload"]) if m["zstd-19+dict"] else float("nan")
-        so = rho(r["orig_bytes"], m["STB+Ω"]["payload"])
-        sr = rho(r["orig_bytes"], m["STB"]["payload"])
-        if z > so and z > sr:
-            wins += 1
+        o = r["orig_bytes"]
+        z = rho(o, m["zstd-19"]["iso"])
+        x = rho(o, m["xz-9e"]["iso"])
+        zd_am = rho(o, m["zstd-19+dict"]["amort"]) if m["zstd-19+dict"] else float("nan")
+        zd_pl = rho(o, m["zstd-19+dict"]["payload"]) if m["zstd-19+dict"] else float("nan")
+        v = {k: rho(o, m[k]["payload"]) for k in STB_VARIANTS}
+        if z > max(v[k] for k in STB_VARIANTS):
+            wins_all += 1
+        v2_am = rho(o, m["STB-v2 com Γ"]["amort"])
+        if v2_am > z and v2_am > zd_am and v2_am > v["STB-v2 sem Γ"]:
+            wins_v2 += 1
+        best_stb = max(STB_VARIANTS, key=lambda k: v[k])  # maior ρ = melhor
         lines.append(
-            f"- **{FAMILY_LABELS.get(fam, fam).split(' (')[0]}**: zstd-19 ρ = {z:.2f}; "
-            f"zstd-19+dict ρ = {zd:.2f}; STB+Ω ρ = {so:.2f}; STB ρ = {sr:.2f} "
-            f"(ρ sem custo de dicionário/Γ)."
+            f"- **{FAMILY_LABELS.get(fam, fam).split(' (')[0]}**: xz-9e ρ = {x:.2f}; zstd-19 ρ = {z:.2f}; "
+            f"zstd-19+dict ρ amortizado = {zd_am:.2f} (sem custo = {zd_pl:.2f}); "
+            f"STB-v2 com Γ ρ amortizado = {rho(o, m['STB-v2 com Γ']['amort']):.2f} "
+            f"(sem custo = {v['STB-v2 com Γ']:.2f}); "
+            f"STB-v2 sem Γ ρ = {v['STB-v2 sem Γ']:.2f}; "
+            f"melhor variante STB sem custo de Γ = {v[best_stb]:.2f} ({best_stb})."
         )
     lines += [
         "",
-        f"Em {wins} de {len(structured)} famílias estruturadas, zstd-19 sem dicionário supera as duas "
-        "variantes do STB mesmo quando o dicionário/Γ não é contado. No controle aleatório, todos "
-        "os métodos ficam em ~1,0, como esperado.",
+        f"Em {wins_all} de {len(structured)} famílias estruturadas, zstd-19 sem dicionário supera "
+        "todas as variantes do STB mesmo quando o custo de Γ não é contado.",
+        f"O STB-v2 com Γ supera, na contabilidade amortizada, zstd-19 sem dicionário, zstd-19+dict "
+        f"e a sua própria versão sem Γ em {wins_v2} de {len(structured)} famílias.",
+        "No controle aleatório, todos os métodos ficam em ~1,0, como esperado.",
         "",
         "Conclusão limitada a este formato, a este encoder e a este orçamento de Γ. Ver "
         "“Ambiente e limitações” e a análise de sensibilidade.",
@@ -241,7 +312,8 @@ def render_md(results, env):
             "| Método | ρ isolado | ρ amortizado | ρ sem custo de dicionário/Γ | Falhas de round-trip | Tempo (s) |",
             "|---|---:|---:|---:|---:|---:|",
         ]
-        for name in ("zlib-9", "zstd-19", "zstd-19+dict", "STB", "STB+Ω"):
+        for name in ("zlib-9", "xz-9e", "zstd-19", "zstd-19+dict", "STB", "STB+Ω",
+                     "STB-v2 sem Γ", "STB-v2 com Γ"):
             m = r["methods"].get(name)
             if m is None:
                 lines.append(f"| {name} | — | — | — | — | — |")
@@ -254,7 +326,8 @@ def render_md(results, env):
         s2 = r["methods"]["STB+Ω"]
         lines += [
             "",
-            f"Γ: {s['genes']} genes, {s['gamma_bytes']/1024:.1f} KiB. "
+            f"Γ: {s['genes']} genes, {s['gamma_bytes']/1024:.1f} KiB crus, "
+            f"{s['gamma_charged_bytes']/1024:.1f} KiB cobrados (min(cru, LZMA)). "
             f"STB (formato atual): {100*s['ref_share']:.1f}% dos bytes saem de REF, "
             f"{100*s['literal_share']:.1f}% são literais crus; "
             f"média de {s['genes_used_mean']:.0f} genes distintos por arquivo. "
@@ -269,7 +342,10 @@ def render_md(results, env):
         "toolchain Rust. O round-trip é verificado com esse port, não com o binário Rust.",
         "- O encoder é deliberadamente simples (guloso, genes de 16/32/64 bytes). Ele mede o formato atual, "
         "não o limite teórico do STB.",
-        "- O formato não tem REF para bytes já emitidos; repetições intra-arquivo fora de Γ viram literais.",
+        "- STB (v1) não tem REF para bytes já emitidos; repetições intra-arquivo fora de Γ viram literais. "
+        "STB-v2 tem COPY (cópia intra-arquivo), que também é extensão do benchmark, não do formato Rust.",
+        "- STB-v2: MIN_COPY = 6 e CHAIN = 32 foram fixados antes desta rodada e não foram ajustados "
+        "pelos resultados de teste. Os fluxos são comprimidos por arquivo, sem contexto compartilhado.",
         "- STB+Ω usa a operação RES, que só existe no port do benchmark (extensão proposta). Ela é a "
         "variante compatível com o paper (resíduo classicamente comprimido), não o formato implementado hoje.",
         "- Dados: Loghub (logpai/loghub), seaborn-data e a stdlib do Python instalada no ambiente. "
@@ -284,7 +360,7 @@ SENS_BUDGETS_KIB = (32, 110, 512)
 
 
 def sensitivity(family):
-    """Repete STB, STB+Ω e zstd+dict variando o orçamento de Γ/dicionário."""
+    """Repete zstd+dict, STB, STB+Ω e STB-v2 variando o orçamento de Γ/dicionário (custo comprimido)."""
     train = [b for _, b in load(family, "train")]
     test = load(family, "test")
     orig_total = sum(len(b) for _, b in test)
@@ -298,9 +374,9 @@ def sensitivity(family):
         if zdict is not None:
             c = zstandard.ZstdCompressor(level=19, dict_data=zstandard.ZstdCompressionDict(zdict))
             sizes = [len(c.compress(b)) for _, b in test]
-            row["zstd-19+dict"] = (sum(sizes), sum(sizes) + len(zdict))
+            row["zstd-19+dict"] = (sum(sizes), sum(sizes) + charged(zdict))
         lib = stb_codec.Library(stb_codec.build_library(train, budget))
-        G = lib.serialized_size()
+        G_raw, G = gamma_charge(lib)
         p_sizes = []
         for _, b in test:
             prog, _, _ = stb_codec.encode(b, lib)
@@ -317,9 +393,12 @@ def sensitivity(family):
             o_sizes.append(len(prog) + len(om_c))
         omega_payload = sum(o_sizes) + CAPSID * n
         row["STB+Ω"] = (omega_payload, omega_payload + G)
+        v2 = bench_stb_v2(test, lib, G, n)
+        row["STB-v2"] = (v2["payload"], v2["amort"])
         row["gamma_kib"] = G / 1024
         rows.append(row)
-        print(f"    orçamento {kib} KiB: STB+Ω amort={rho(orig_total, omega_payload + G):.3f}")
+        print(f"    orçamento {kib} KiB: STB-v2 amort={rho(orig_total, v2['amort']):.3f} "
+              f"STB+Ω amort={rho(orig_total, omega_payload + G):.3f}")
     return {"files": n, "orig_bytes": orig_total, "rows": rows}
 
 
@@ -327,16 +406,16 @@ def render_sensitivity(sens):
     lines = [
         "## Sensibilidade ao orçamento de Γ/dicionário",
         "",
-        "ρ com orçamento de 32, 110 e 512 KiB (mesmo treino, mesmo teste). Entre parênteses: "
-        "ρ sem custo de dicionário/Γ.",
+        "ρ amortizado com orçamento de 32, 110 e 512 KiB (mesmo treino, mesmo teste). Entre parênteses: "
+        "ρ sem custo de dicionário/Γ. Γ e dicionário são cobrados comprimidos (min(cru, LZMA)).",
         "",
-        "| Família | Orçamento | Γ real (KiB) | zstd-19+dict | STB | STB+Ω |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| Família | Orçamento | Γ cobrada (KiB) | zstd-19+dict | STB | STB+Ω | STB-v2 |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for fam, r in sens.items():
         for row in r["rows"]:
             cells = []
-            for m in ("zstd-19+dict", "STB", "STB+Ω"):
+            for m in ("zstd-19+dict", "STB", "STB+Ω", "STB-v2"):
                 if m not in row:
                     cells.append("—")
                     continue
