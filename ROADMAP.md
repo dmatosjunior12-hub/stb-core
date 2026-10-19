@@ -12,7 +12,9 @@
 ## v0.3 (planned)
 - [ ] Iterative `skip_instruction` (eliminate recursion stack risk)
 - [ ] CSPRNG seed for ALE (replace predictable XorShift)
-- [ ] MAX_VM_STEPS global execution limit
+- [x] MAX_VM_STEPS global execution limit (50M passos)
+- [x] Validação estática do bytecode antes da execução (STP final, RPT/RPTEND balanceados)
+- [x] Política `Partial` não executa mais bytecode com checksum inválido
 - [ ] Expanded test suite with corpus fixtures
 
 ## v0.4 (planned)
