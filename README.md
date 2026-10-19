@@ -65,16 +65,9 @@ let output = vm.execute_bytecode(&bytecode).unwrap();
 
 ## Benchmark
 
-`bench/` compara o formato STB com DEFLATE, xz e zstd em dados reais (logs do Loghub, CSVs,
-código e `.pyc` da stdlib), contando a biblioteca de genes (comprimida) no custo e treinando-a só
-com dados de treino. Resultado atual: nem o STB atual, nem as variantes com resíduo comprimido
-(STB+Ω) e com COPY (STB-v2) superam o zstd-19 sem dicionário em nenhuma família estruturada.
-Detalhes e limitações em [`bench/RESULTS.md`](bench/RESULTS.md).
-
-```bash
-pip install -r bench/requirements.txt
-python3 bench/build_corpus.py && python3 bench/run_benchmark.py
-```
+`bench/` contém um benchmark em andamento que compara codificações baseadas em genes com
+DEFLATE, xz e zstd em dados reais. Os resultados ainda não foram publicados neste README.
+Ver [`bench/README.md`](bench/README.md) para como rodar e quais são as limitações conhecidas.
 
 ## Security limits
 

@@ -32,6 +32,13 @@ brutos ficam em `bench/data/`, que está no `.gitignore`.
 | `stb_v2.py` | STB-v2: tokenização (LIT/REF/RPT/COPY/STP), fluxos separados e empacotamento |
 | `run_benchmark.py` | Executa métodos, verifica round-trip, gera `RESULTS.md` |
 | `test_bench.py` | Testes do port e do encoder |
+| `stb_v2.py` (parsers) | `greedy`, `lazy` e `optimal` (DP com custo fixo em bits); `allow_copy=False` = só genes |
+| `compare_parsers.py` | Parsers × COPY × Γ, com round-trip; `--swap` inverte treino e teste. Gera `results/parsers*.json` |
+| `baselines_split.py` | zstd-19, zstd+dict e xz-9e para a mesma divisão. Gera `results/baselines*.json` |
+| `gamma_effect.py` | Efeito de Γ no payload (sem custo de Γ) e controle sem Γ/sem COPY. Gera `results/gamma_effect.json` |
+
+Os resultados dos scripts de análise ficam em `bench/results/` (fora do Git). Nenhum deles foi
+publicado no README ainda: a publicação aguarda mais testes.
 
 ## Métodos
 

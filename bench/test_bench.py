@@ -233,5 +233,83 @@ class StbV2Tests(unittest.TestCase):
             stb_v2.unpack_stream(bytes([9, 0]), 0)
 
 
+class ParserTests(unittest.TestCase):
+    """Parsers guloso, lazy e ótimo (stb_v2): round-trip, COPY só quando permitido, e custo do DP."""
+
+    def sample(self):
+        rnd = random.Random(7)
+        genes = [b"GENE-SEQUENCE-ABCDEFGH", b"another gene body here!"]
+        parts = [genes[0], b"-x-", genes[1], b"%06d" % rnd.randrange(10**6), genes[0] * 2]
+        parts += [bytes(rnd.randrange(256) for _ in range(40)), b"abcabcabc" * 9, b"\x00" * 50]
+        return b"".join(parts), genes
+
+    def check_roundtrip(self, data, genes, parser, allow_copy):
+        import stb_v2
+        lib = lib_from(genes)
+        toks, R = stb_v2.tokenize(data, lib, parser, allow_copy)
+        s = stb_v2.streams_from_tokens(toks, R)
+        s2 = stb_v2.unpack_streams(stb_v2.pack_streams(s))
+        prog = stb_v2.bytecode_from_tokens(stb_v2.tokens_from_streams(s2), lib)
+        self.assertEqual(stb_vm.execute(prog, lib.payload, residue=s2["R"]), data)
+        return toks
+
+    def test_all_parsers_roundtrip_with_and_without_copy(self):
+        import stb_v2
+        data, genes = self.sample()
+        for parser in stb_v2.PARSERS:
+            for allow_copy in (True, False):
+                with self.subTest(parser=parser, allow_copy=allow_copy):
+                    toks = self.check_roundtrip(data, genes, parser, allow_copy)
+                    if not allow_copy:
+                        self.assertFalse(any(t[0] == stb_v2.T_COPY for t in toks))
+
+    def test_copy_used_for_intra_file_repeat(self):
+        import stb_v2
+        data = b"0123456789-" * 40
+        for parser in stb_v2.PARSERS:
+            toks = self.check_roundtrip(data, [], parser, True)
+            self.assertTrue(any(t[0] == stb_v2.T_COPY for t in toks), parser)
+
+    def test_optimal_model_cost_not_above_greedy(self):
+        import stb_v2
+        data, genes = self.sample()
+        lib = lib_from(genes)
+
+        def model_bits(events):
+            total = 0.0
+            for e in events:
+                if e[0] == "L":
+                    total += stb_v2.LIT_BITS * e[2]
+                elif e[0] == "G":
+                    total += stb_v2.GENE_BITS
+                else:
+                    total += stb_v2._copy_bits(e[1], e[2])
+            return total
+
+        for allow_copy in (True, False):
+            g = model_bits(stb_v2.parse(data, lib, "greedy", allow_copy))
+            o = model_bits(stb_v2.parse(data, lib, "optimal", allow_copy))
+            self.assertLessEqual(o, g + 1e-9)
+
+    def test_events_cover_input_exactly(self):
+        import stb_v2
+        data, genes = self.sample()
+        lib = lib_from(genes)
+        for parser in stb_v2.PARSERS:
+            pos = 0
+            for e in stb_v2.parse(data, lib, parser, True):
+                if e[0] == "L":
+                    self.assertEqual(e[1], pos)
+                    pos += 1
+                elif e[0] == "G":
+                    self.assertEqual(data[pos:pos + e[2]], genes[e[1]])
+                    pos += e[2]
+                else:
+                    self.assertGreaterEqual(e[1], 1)
+                    self.assertLessEqual(e[1], pos)
+                    pos += e[2]
+            self.assertEqual(pos, len(data), parser)
+
+
 if __name__ == "__main__":
     unittest.main()
