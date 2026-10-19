@@ -19,8 +19,10 @@
 
 ## v0.4 (planned)
 - [ ] Content-defined chunking backend (FastCDC integration)
-- [ ] Benchmark framework against DEFLATE / zstd / H.264 baselines
-- [ ] Measurement of ρ_STB on real data
+- [x] Benchmark framework against DEFLATE / zstd (`bench/`); H.264 ainda pendente
+- [ ] Baseline de vídeo (H.264) no benchmark
+- [x] Measurement of ρ_STB on real data (logs, código, CSV, .pyc; ver `bench/RESULTS.md`): o formato atual fica abaixo do zstd
+- [ ] Encoder com REF a bytes já emitidos (in-file), a maior lacuna medida
 
 ## v1.0 (future)
 - [ ] End-to-end STB prototype on a real domain (video or text)

@@ -63,6 +63,18 @@ let mut vm = STBVM::new(GeneLibrary::new());
 let output = vm.execute_bytecode(&bytecode).unwrap();
 ```
 
+## Benchmark
+
+`bench/` compara o formato STB com DEFLATE e zstd em dados reais (logs do Loghub, CSVs,
+código e `.pyc` da stdlib), contando a biblioteca de genes no custo e treinando-a só com
+dados de treino. Resultado atual: o formato ainda fica bem abaixo do zstd-19, mesmo com a
+extensão de resíduo comprimido. Detalhes e limitações em [`bench/RESULTS.md`](bench/RESULTS.md).
+
+```bash
+pip install -r bench/requirements.txt
+python3 bench/build_corpus.py && python3 bench/run_benchmark.py
+```
+
 ## Security limits
 
 | Limit | Value |
