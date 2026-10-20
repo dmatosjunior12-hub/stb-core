@@ -443,5 +443,115 @@ class GammaCopyTests(unittest.TestCase):
                     self.assertTrue(egd.verify_vm(toks, R, lib, G, data))
 
 
+class StreamFormatTests(unittest.TestCase):
+    """Formato de fluxos fluxos-v1 (stb_stream_format.py), tokens G0."""
+
+    GENES = [bytes([i % 256]) * 8 + bytes([i // 256]) for i in range(300)]  # 300 genes distintos
+
+    def _toks(self, rnd, n=200):
+        import stb_v2
+        toks = []
+        for _ in range(n):
+            k = rnd.choice(("lit", "ref", "rpt"))
+            if k == "lit":
+                toks.append((stb_v2.T_LIT, rnd.randint(1, 40)))
+            elif k == "ref":
+                toks.append((stb_v2.T_REF, rnd.randrange(300)))
+            else:
+                toks.append((stb_v2.T_RPT, rnd.randint(3, 50), rnd.randrange(300)))
+        toks.append((stb_v2.T_STP,))
+        R = bytes(rnd.randrange(256) for _ in range(sum(t[1] for t in toks if t[0] == stb_v2.T_LIT)))
+        return toks, R
+
+    def test_roundtrip_random_token_lists(self):
+        import stb_stream_format as sf
+        rnd = random.Random(7)
+        for _ in range(20):
+            toks, R = self._toks(rnd)
+            blob = sf.encode(toks, R, 300)
+            self.assertEqual(sf.decode(blob, 300), (toks, R))
+
+    def test_roundtrip_only_stp_and_empty_literals(self):
+        import stb_stream_format as sf
+        import stb_v2
+        toks = [(stb_v2.T_STP,)]
+        self.assertEqual(sf.decode(sf.encode(toks, b"", 0), 0), (toks, b""))
+        toks = [(stb_v2.T_REF, 0), (stb_v2.T_STP,)]
+        self.assertEqual(sf.decode(sf.encode(toks, b"", 1), 1), (toks, b""))
+
+    def test_rc_models_roundtrip_per_stream(self):
+        import stb_stream_format as sf
+        import stb_v2
+        rnd = random.Random(3)
+        kinds = [rnd.choice((0, 1, 2, 4)) for _ in range(500)] + [4]
+        lens = [rnd.randint(1, 1000) for _ in range(300)]
+        cnts = [rnd.randint(3, 5000) for _ in range(300)]
+        gids = [rnd.randrange(300) for _ in range(300)]
+        for kind, vals in (("T", kinds), ("LEN", lens), ("CNT", cnts), ("GID", gids)):
+            with self.subTest(kind=kind):
+                body = sf._rc_encode(kind, vals, 300)
+                self.assertEqual(sf._rc_decode(kind, body, len(vals), 300), vals)
+
+    def test_incompressible_residue_stored_raw(self):
+        import stb_stream_format as sf
+        import stb_v2
+        rnd = random.Random(11)
+        R = bytes(rnd.randrange(256) for _ in range(4000))
+        toks = [(stb_v2.T_LIT, len(R)), (stb_v2.T_STP,)]
+        blob = sf.encode(toks, R, 0)
+        # cabeçalho: versão, depois o registro T (método, n, tamanho); R é o último registro
+        rd = sf._Reader(blob)
+        rd.byte()
+        for kind in ("T", "LEN", "CNT", "GID"):
+            sf._decode_record(rd, kind, 0)
+        self.assertEqual(blob[rd.pos], sf.M_RAW)
+
+    def test_structural_rejections(self):
+        import stb_stream_format as sf
+        import stb_v2
+        good = sf.encode([(stb_v2.T_LIT, 3), (stb_v2.T_STP,)], b"abc", 0)
+        bad_inputs = {
+            "versão": bytes([9]) + good[1:],
+            "truncado": good[:-2],
+            "bytes sobrando": good + b"\x00",
+            "vazio": b"",
+        }
+        for name, buf in bad_inputs.items():
+            with self.subTest(case=name):
+                with self.assertRaises(ValueError):
+                    sf.decode(buf, 0)
+        with self.assertRaises(ValueError):  # COPY não existe no fluxos-v1
+            sf.encode([(stb_v2.T_COPY, 1, 6), (stb_v2.T_STP,)], b"", 0)
+        with self.assertRaises(ValueError):  # gene fora de Γ
+            sf.encode([(stb_v2.T_REF, 5), (stb_v2.T_STP,)], b"", 3)
+        with self.assertRaises(ValueError):  # sem STP final
+            sf.encode([(stb_v2.T_LIT, 1)], b"a", 0)
+        with self.assertRaises(ValueError):  # soma dos LIT não confere com R
+            sf.encode([(stb_v2.T_LIT, 2), (stb_v2.T_STP,)], b"a", 0)
+
+    def test_every_single_bit_flip_is_detected_by_digest(self):
+        """O digest do cabeçalho é SHA-256(bytecode ‖ R): nenhuma inversão de bit pode passar."""
+        import hashlib
+        import stb_stream_format as sf
+        import stb_v2
+        lib = lib_from(self.GENES[:3])
+        toks = [(stb_v2.T_LIT, 5), (stb_v2.T_REF, 1), (stb_v2.T_RPT, 7, 2), (stb_v2.T_STP,)]
+        R = b"hello"
+        digest = hashlib.sha256(stb_v2.bytecode_from_tokens(toks, lib) + R).digest()
+        blob = sf.encode(toks, R, 3)
+        silent = 0
+        for j in range(len(blob)):
+            for bit in range(8):
+                x = bytearray(blob)
+                x[j] ^= 1 << bit
+                try:
+                    t2, R2 = sf.decode(bytes(x), 3)
+                except ValueError:
+                    continue
+                if hashlib.sha256(stb_v2.bytecode_from_tokens(t2, lib) + R2).digest() == digest:
+                    silent += 1
+        self.assertEqual(silent, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
