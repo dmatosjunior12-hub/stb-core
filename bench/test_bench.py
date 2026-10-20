@@ -393,5 +393,55 @@ class RangeCoderTests(unittest.TestCase):
             token_coder.encode_tokens([(stb_v2.T_LIT, 2), (stb_v2.T_STP,)], b"abc", 0)
 
 
+class GammaCopyTests(unittest.TestCase):
+    """Janela de Γ (exp_gamma_dict.py) e COPY restrito a Γ (exp_gamma_copy.py), v1 a v3."""
+
+    def test_restricted_copies_source_inside_gamma(self):
+        import exp_gamma_copy as ec
+        G = b"the quick brown fox jumps over the lazy dog " * 4
+        idx = ec.GammaIndex(G)
+        data = b"quick brown fox jumps over the lazy cat, the quick brown fox"
+        comb = G + data
+        found = 0
+        for p in range(len(data)):
+            for dist, L in idx.copies(comb, p, len(data)):
+                found += 1
+                j = len(G) + p - dist
+                self.assertGreaterEqual(j, 0)
+                self.assertLessEqual(j + L, len(G))  # a fonte inteira está dentro de Γ
+        self.assertGreater(found, 0)
+
+    def test_roundtrip_v3_variants_both_parsers(self):
+        import exp_gamma_copy as ec
+        import exp_gamma_dict as egd
+        import token_coder
+        genes = [b"GENE-SEQUENCE-ABCDEFGH", b"another gene body here!", b"x" * 40]
+        lib = lib_from(genes)
+        G = b"".join(genes)
+        gidx = ec.GammaIndex(G)
+        data = (G[5:40] + b"-xyz-" + G[100:160] + b"0123456789" * 3 + bytes(range(50))
+                + genes[2] + genes[0])
+        for parser in ("guloso", "otimo"):
+            for variant in ("G0", "E0", "E1"):
+                with self.subTest(parser=parser, variant=variant):
+                    toks, R = ec.tokens_for(variant, parser, data, lib, gidx, G)
+                    n_genes = len(genes) if variant in ("G0", "E1") else 0
+                    blob = token_coder.encode_tokens(toks, R, n_genes)
+                    self.assertEqual(token_coder.decode_tokens(blob, n_genes), (toks, R))
+                    self.assertTrue(egd.verify_vm(toks, R, lib, G, data))
+
+    def test_roundtrip_v1_v2_window_variants(self):
+        import exp_gamma_dict as egd
+        genes = [b"GENE-SEQUENCE-ABCDEFGH", b"another gene body here!", b"x" * 40]
+        lib = lib_from(genes)
+        G = b"".join(genes)
+        data = G[5:40] + b"-xyz-" + genes[1] * 2 + b"abcabcabc" * 9 + genes[2]
+        for parser in ("guloso", "otimo"):
+            for variant in ("A", "B", "C", "D"):
+                with self.subTest(parser=parser, variant=variant):
+                    toks, R = egd.variant_tokens(variant, data, lib, G, parser)
+                    self.assertTrue(egd.verify_vm(toks, R, lib, G, data))
+
+
 if __name__ == "__main__":
     unittest.main()
