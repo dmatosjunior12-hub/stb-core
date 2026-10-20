@@ -4,8 +4,21 @@ Premissa testada: o STB como codificação semântica/perceptual, em que a recon
 X̂ satisfaz uma tolerância τ e não precisa ser igual a X (paper, §3.2 L1, §4 N4).
 
 Este documento descreve a versão **stb-lossy-v1**, implementada em `bench/exp_lossy.py`.
-Resultados brutos: `bench/results/lossy_stb-lossy-v1.json` (ignorado pelo Git).
-Reprodução: `python bench/exp_lossy.py` (cerca de 12 min; 8 imagens, 72 configurações do STB por imagem).
+Resultados brutos: `bench/results/lossy_<versão>_<conjunto>.json` (ignorado pelo Git).
+Reprodução:
+- `python bench/exp_lossy.py --modo limiar --conjunto naturais` (stb-lossy-v1; cerca de 13 min)
+- `python bench/exp_lossy.py --modo rd --conjunto naturais` (stb-lossy-v2-rd; cerca de 20 min)
+- `--conjunto estruturadas` roda as mesmas versões nas 6 imagens de `synth_structured.py`.
+- `python bench/comparar_lossy.py` gera as tabelas de comparação a partir dos JSONs.
+
+## Versões
+
+- **stb-lossy-v1** (modo `limiar`): para cada bloco, o primeiro gene na ordem FLAT → REF →
+  PLANE com SSIM local ≥ τ; senão RES.
+- **stb-lossy-v2-rd** (modo `rd`): para cada bloco, o candidato que minimiza
+  `bits + λ·(1 − SSIM_local)`. Mesmo fluxo e mesmo decodificador da v1; só muda a escolha
+  do codificador. Custos estimados (modelo, não medidos): FLAT 8, REF 16, PLANE 24,
+  RES 64·log2(256/q + 1) bits. Grade de λ: 100 a 30000.
 
 ## Escopo e limites do que foi medido
 
@@ -113,6 +126,41 @@ Os alvos 0,90 e 0,98 estão no JSON e seguem a mesma ordem.
    imagens (por exemplo, 4,90 contra 4,36 bpp na camera). Por isso, comparar STB com
    zstd sem perda superestima o STB.
 
+## Atualização: escolha por custo e conjunto estruturado
+
+Conjunto **estruturado**: 6 imagens geradas por `synth_structured.py` (gráfico de linha,
+gráfico de barras, documento, tabela, interface e diagrama), 512×512, em tons de cinza,
+determinísticas. Foram desenhadas por mim, para ter regiões planas, texto e formas
+repetidas. Não representam documentos reais.
+
+**v2-rd contra v1, por imagem (melhor/empate/pior da v2-rd; média geométrica do bpp):**
+
+| Conjunto | 0,90 | 0,95 | 0,98 |
+|---|---|---|---|
+| naturais | 6/0/2 (geo 1,037) | 6/0/2 (geo 0,910) | 4/1/3 (geo 1,013) |
+| estruturadas | 2/0/4 (geo 0,972) | 2/0/4 (geo 1,015) | 2/0/4 (geo 1,028) |
+
+A escolha por custo não muda o veredito: o ganho em um conjunto some no outro.
+
+**Estruturadas contra JPEG, WebP e Q+xz (v2-rd; a v1 tem o mesmo padrão):**
+
+| Alvo | vs JPEG | vs WebP | vs Q+xz |
+|---|---|---|---|
+| 0,90 | 6/0/0 (geo 0,197) | 6/0/0 (geo 0,475) | 2/0/4 (geo 1,118) |
+| 0,95 | 6/0/0 (geo 0,161) | 6/0/0 (geo 0,516) | 2/0/4 (geo 1,215) |
+| 0,98 | 6/0/0 (geo 0,124) | 6/0/0 (geo 0,511) | 1/0/5 (geo 1,294) |
+
+**Naturais contra Q+xz (v2-rd):** 7/0/1 em 0,90 e 0,95, e 5/0/3 em 0,98 (geo 0,85, 0,77 e 0,95).
+
+Leitura:
+- Nas imagens estruturadas, o STB vence JPEG e WebP em todas as imagens. Mas perde para
+  Q+xz na maioria. Então, nesse conjunto, a vantagem sobre JPEG e WebP vem da entropia do
+  LZMA sobre os pixels quantizados. Os genes não acrescentam nada além disso. Por que
+  Q+xz vence aqui e não nas naturais, eu não investiguei.
+- Em naturais, os genes economizam 5% a 23% contra Q+xz, como antes.
+- No alvo 0,9999 (quase sem perda), a v2-rd não atinge o alvo em vários casos. A grade de
+  λ termina em 30000 e não é suficiente para isso. Por isso essa linha não é conclusiva.
+
 ## Piloto descartado
 
 Um primeiro teste usou MSE como critério de aceitação de bloco. Ele aceitava blocos
@@ -123,6 +171,10 @@ com 3112 blocos FLAT). Foi trocado por SSIM local. O piloto não está no JSON f
 
 - 8 imagens em tons de cinza, de um único pacote. Não há conjunto de treino separado,
   porque Γ é construído por imagem.
+- O conjunto estruturado foi desenhado por mim. Ele não é evidência sobre documentos reais.
+- A escolha por custo é gulosa, bloco a bloco. Não considera que um REF aponta para um bloco
+  já decodificado, e não otimiza o efeito de um bloco sobre os seguintes. Os custos em bits
+  são estimativas, não os tamanhos reais dos fluxos.
 - Grade discreta: o "menor bpp no alvo" depende dos pontos testados. Alguns resultados
   são não monotônicos (por exemplo, o STB não atinge 0,9999 em page com REF, mas com
   REF desligado atinge).

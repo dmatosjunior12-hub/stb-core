@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
-"""stb-lossy-v1: experimento com perda (regime perceptual, métrica SSIM).
+"""Experimento com perda (regime perceptual, métrica SSIM).
 
-Compara o STB com tolerância contra JPEG, WebP e duas referências:
-- Q+xz: o mesmo quantizador do resíduo aplicado a todos os pixels, sem genes.
-  Isola o efeito dos genes: se STB não supera Q+xz, os genes não ajudam.
-- zstd-19 exato: referência sem perda.
+Versões do codificador (o fluxo e o decodificador são os mesmos nas duas):
+- stb-lossy-v1: escolha gananciosa. Para cada bloco, o primeiro gene na ordem
+  FLAT -> REF -> PLANE cujo SSIM local >= tau; senão RES.
+- stb-lossy-v2-rd: escolha por custo. Para cada bloco, o candidato que minimiza
+  bits + lam * (1 - SSIM_local), entre FLAT, REF, PLANE e RES.
 
-Regras declaradas (não calibradas; ver bench/LOSSY.md):
+Referências: Q+xz (mesmo quantizador, sem genes), JPEG, WebP (Pillow) e zstd-19 exato.
+Conjuntos: "naturais" (imagens do scikit-image) e "estruturadas" (synth_structured.py).
+
+Regras (ver bench/LOSSY.md):
 - Imagens em tons de cinza, cortadas para múltiplos de 8. Blocos 8x8 em varredura.
-- Critério de aceitação de gene: SSIM local do bloco (mesma fórmula do SSIM, sem janela
-  deslizante, com C1 e C2 do SSIM) >= tau. Cada bloco recebe o primeiro gene que satisfaz,
-  na ordem FLAT -> REF -> PLANE; se nenhum satisfaz, RES (resíduo quantizado com passo q).
-  RES é sempre permitido. Um piloto com MSE como critério foi descartado: MSE baixo aceitava
-  blocos texturados trocados por média plana, com SSIM global ruim.
 - REF aponta para um dos últimos W = 1024 blocos já decodificados. Γ não é um arquivo
-  separado: a biblioteca são os blocos decodificados, e seu custo é o das próprias
-  instruções que a constroem.
-- Custo do STB: 40 B de capsídeo (como no fluxos-v1) + fluxos. Q+xz paga só seus
-  fluxos. JPEG e WebP pagam o arquivo inteiro.
-- Para cada alvo de SSIM, a configuração de menor bpp com SSIM >= alvo.
-- O decodificador é de referência em Python. A via com perda não passa pela VM STB.
+  separado: a biblioteca são os blocos decodificados.
+- Custo do STB: 40 B de capsídeo + fluxos. Q+xz paga só os fluxos. JPEG/WebP pagam o arquivo.
+- Para cada alvo de SSIM, a configuração de menor bpp com SSIM >= alvo (por imagem).
+- Custo de bits usado só na escolha RD (modelo, não medido): FLAT 8, REF 16, PLANE 24,
+  RES 64 * log2(256 // q + 1). Os tamanhos medidos são os dos fluxos reais.
+- O decodificador é de referência, em Python. A via com perda não passa pela VM STB.
 
-Uso: python bench/exp_lossy.py [--images camera,moon] [--out bench/results/lossy_stb-lossy-v1.json]
+Uso:
+  python bench/exp_lossy.py --modo limiar --conjunto naturais
+  python bench/exp_lossy.py --modo rd --conjunto estruturadas
 """
 
 import argparse
@@ -39,20 +40,26 @@ from PIL import Image
 from skimage import data as skdata
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
-VERSION = "stb-lossy-v1"
+import synth_structured
+
+VERSAO_LIMIAR = "stb-lossy-v1"
+VERSAO_RD = "stb-lossy-v2-rd"
+VERSAO_POR_MODO = {"limiar": VERSAO_LIMIAR, "rd": VERSAO_RD}
+
 B = 8  # tamanho do bloco
 W = 1024  # janela da biblioteca de REF (blocos decodificados)
 CAPSID_BYTES = 40
 PLANE_STEP = 0.25  # passo dos coeficientes de gradiente (int8)
 FLAT, REF, PLANE, RES = 0, 1, 2, 3
-TAU_GRID = [0.9999, 0.99, 0.97, 0.94, 0.9, 0.8]  # limiar de SSIM local por bloco
+TAU_GRID = [0.9999, 0.99, 0.97, 0.94, 0.9, 0.8]  # limiar de SSIM local (modo limiar)
+LAM_GRID = [100, 300, 1000, 3000, 10000, 30000]  # peso da distorção (modo rd)
 Q_GRID = [1, 2, 4, 8, 16, 32]  # passo do quantizador do resíduo
-C1 = (0.01 * 255) ** 2
-C2 = (0.03 * 255) ** 2
 JPEG_Q = [10, 20, 30, 40, 50, 60, 70, 80, 90, 95]
 WEBP_Q = [10, 20, 30, 40, 50, 60, 70, 80, 90, 95]
-TARGETS = [0.90, 0.95, 0.98, 0.9999]  # 0.9999 = sem perda
+TARGETS = [0.90, 0.95, 0.98, 0.9999]  # 0.9999 = quase sem perda
 LZMA_FILTERS = [{"id": lzma.FILTER_LZMA2, "preset": 9 | lzma.PRESET_EXTREME}]
+C1 = (0.01 * 255) ** 2
+C2 = (0.03 * 255) ** 2
 
 _YY, _XX = np.mgrid[0:B, 0:B]
 _DESIGN = np.stack([np.ones(B * B), _XX.ravel(), _YY.ravel()], 1).astype(float)
@@ -71,7 +78,9 @@ def _crop8(img):
     return np.ascontiguousarray(img[: h // B * B, : w // B * B])
 
 
-def load_images():
+def load_images(conjunto="naturais"):
+    if conjunto == "estruturadas":
+        return {k: _crop8(np.asarray(v, dtype=np.uint8)) for k, v in synth_structured.carregar_estruturadas().items()}
     fontes = {
         "camera": skdata.camera,
         "astronaut": lambda: _gray(skdata.astronaut()),
@@ -206,11 +215,41 @@ def _unpack_choices(raw, n):
     return np.stack([(a >> s) & 3 for s in (0, 2, 4, 6)], 1).ravel()[:n]
 
 
-# ---------------------------------------------------------------- stb-lossy-v1
+# ---------------------------------------------------------------- stb-lossy
 
 
-def encode(img, q, tau, usar_ref=True):
-    """Codifica uma imagem. Devolve (blob, reconstrução, contagem por gene)."""
+def _bits_res(q):
+    return 64 * math.log2(256 // q + 1)
+
+
+def _candidatos(x, k, dec, q, usar_ref):
+    """Gera (escolha, reconstrução, SSIM local, bits estimados, payload) na ordem FLAT, REF, PLANE, RES.
+
+    O último candidato (RES) é sempre gerado.
+    """
+    v = int(np.clip(np.round(x.mean()), 0, 255))
+    plano = np.full(B * B, v, np.int32)
+    yield FLAT, plano, float(bssim(x, plano)), 8, bytes([v])
+    if usar_ref and k > 0:
+        lo = max(0, k - W)
+        s = bssim(x, dec[lo:k].astype(float))
+        j = int(np.argmax(s))
+        off = (k - 1) - (lo + j)  # 0 = bloco mais recente
+        yield REF, dec[lo + j].copy(), float(s[j]), 16, bytes([off & 0xFF, off >> 8])
+    a, bq, cq = plane_fit(x)
+    pr = plane_render(a, bq, cq)
+    yield PLANE, pr, float(bssim(x, pr.astype(float))), 24, bytes([a, bq & 0xFF, cq & 0xFF])
+    niveis = quant(x, q)
+    yield RES, dequant(niveis, q), float(bssim(x, dequant(niveis, q).astype(float))), _bits_res(q), bytes(niveis.astype(np.uint8))
+
+
+def encode(img, q, tau=0.9, usar_ref=True, lam=None):
+    """Codifica uma imagem.
+
+    lam is None: modo limiar (stb-lossy-v1), com limiar tau.
+    lam numérico: modo rd (stb-lossy-v2-rd), minimizando bits + lam * (1 - SSIM_local).
+    Devolve (blob, reconstrução, contagem por gene [FLAT, REF, PLANE, RES]).
+    """
     h, w = img.shape
     X = to_blocks(img)
     n = X.shape[0]
@@ -220,30 +259,22 @@ def encode(img, q, tau, usar_ref=True):
     contagem = [0, 0, 0, 0]
     for k in range(n):
         x = X[k]
-        v = int(np.clip(np.round(x.mean()), 0, 255))
-        plano_flat = np.full(B * B, v, np.int32)
-        rec, escolha = None, None
-        if bssim(x, plano_flat) >= tau:
-            escolha, rec = FLAT, plano_flat
-            valores.append(v)
-        if rec is None and usar_ref and k > 0:
-            lo = max(0, k - W)
-            s = bssim(x, dec[lo:k].astype(float))
-            j = int(np.argmax(s))
-            if s[j] >= tau:
-                off = (k - 1) - (lo + j)  # 0 = bloco mais recente
-                escolha, rec = REF, dec[lo + j].copy()
-                refs += bytes([off & 0xFF, off >> 8])
-        if rec is None:
-            a, bq, cq = plane_fit(x)
-            pr = plane_render(a, bq, cq)
-            if bssim(x, pr.astype(float)) >= tau:
-                escolha, rec = PLANE, pr
-                valores += bytes([a, bq & 0xFF, cq & 0xFF])
-        if rec is None:
-            niveis = quant(x, q)
-            escolha, rec = RES, dequant(niveis, q)
-            res += bytes(niveis.astype(np.uint8))
+        if lam is None:
+            escolhido = None
+            for cand in _candidatos(x, k, dec, q, usar_ref):
+                if cand[2] >= tau or cand[0] == RES:
+                    escolhido = cand
+                    break
+        else:
+            cands = list(_candidatos(x, k, dec, q, usar_ref))
+            escolhido = min(cands, key=lambda c: c[3] + lam * (1.0 - c[2]))
+        escolha, rec, _, _, payload = escolhido
+        if escolha in (FLAT, PLANE):
+            valores += payload
+        elif escolha == REF:
+            refs += payload
+        else:
+            res += payload
         escolhas[k] = escolha
         contagem[escolha] += 1
         dec[k] = rec
@@ -376,28 +407,34 @@ def medir(img, codec, cfg, tamanho, rec):
     }
 
 
-def rodar_imagem(img):
+def rodar_imagem(img, modo):
+    principal = VERSAO_POR_MODO[modo]
     linhas = []
     for q in Q_GRID:
         blob, rec = encode_qxz(img, q)
         if not np.array_equal(decode_qxz(blob), rec):
             raise AssertionError("Q+xz: decodificação diferente da reconstrução")
         linhas.append(medir(img, "Q+xz", f"q={q}", len(blob), rec))
-    for variante, usar_ref in [(VERSION, True), (VERSION + " sem REF", False)]:
+    for variante, usar_ref in [(principal, True), (principal + " sem REF", False)]:
         for q in Q_GRID:
-            for tau in TAU_GRID:
-                blob, rec, contagem = encode(img, q, tau, usar_ref)
+            grade = TAU_GRID if modo == "limiar" else LAM_GRID
+            for p in grade:
+                if modo == "limiar":
+                    blob, rec, contagem = encode(img, q, tau=p, usar_ref=usar_ref)
+                    cfg = f"q={q},tau={p}"
+                else:
+                    blob, rec, contagem = encode(img, q, usar_ref=usar_ref, lam=p)
+                    cfg = f"q={q},lam={p}"
                 if not np.array_equal(decode(blob), rec):
-                    raise AssertionError(f"{variante} q={q} tau={tau}: decodificação diferente")
-                linha = medir(img, variante, f"q={q},tau={tau}", len(blob) + CAPSID_BYTES, rec)
+                    raise AssertionError(f"{variante} {cfg}: decodificação diferente")
+                linha = medir(img, variante, cfg, len(blob) + CAPSID_BYTES, rec)
                 linha["genes"] = dict(zip(["FLAT", "REF", "PLANE", "RES"], contagem))
                 linhas.append(linha)
     for codec, fmt, qs in [("JPEG", "JPEG", JPEG_Q), ("WebP", "WEBP", WEBP_Q)]:
         for qq in qs:
             tam, rec = encode_pil(img, fmt, qq)
             linhas.append(medir(img, codec, f"quality={qq}", tam, rec))
-    raw = img.tobytes()
-    exato = zstd.ZstdCompressor(level=19).compress(raw)
+    exato = zstd.ZstdCompressor(level=19).compress(img.tobytes())
     linhas.append(medir(img, "zstd-19 (exato)", "exato", len(exato), img))
     return linhas
 
@@ -407,74 +444,93 @@ def melhor_em(linhas, codec, alvo):
     return min(cands, key=lambda r: r["bpp"]) if cands else None
 
 
-CODECS_RESUMO = [VERSION, VERSION + " sem REF", "Q+xz", "JPEG", "WebP", "zstd-19 (exato)"]
+def codecs_resumo(principal):
+    return [principal, principal + " sem REF", "Q+xz", "JPEG", "WebP", "zstd-19 (exato)"]
 
 
-def resumir(resultados):
+def resumir(resultados, principal):
     resumo = {}
     for alvo in TARGETS:
-        por_codec = {}
-        for codec in CODECS_RESUMO:
-            por_codec[codec] = {
-                nome: (melhor_em(linhas, codec, alvo) or {}) for nome, linhas in resultados.items()
-            }
-        resumo[str(alvo)] = por_codec
+        resumo[str(alvo)] = {
+            codec: {nome: (melhor_em(linhas, codec, alvo) or {}) for nome, linhas in resultados.items()}
+            for codec in codecs_resumo(principal)
+        }
     return resumo
 
 
-def media_geo_razao(resultados, alvo, a, b):
-    """Média geométrica de bpp(a)/bpp(b) nas imagens em que os dois atingem o alvo."""
+def contagens(resultados, a, b, alvo):
+    """Vitórias, empates e derrotas de a contra b por imagem (bpp menor vence), e média geométrica."""
+    vit = emp = der = 0
     razoes = []
     for linhas in resultados.values():
         ra, rb = melhor_em(linhas, a, alvo), melhor_em(linhas, b, alvo)
-        if ra and rb:
-            razoes.append(ra["bpp"] / rb["bpp"])
-    if not razoes:
-        return None, 0
-    return math.exp(sum(math.log(x) for x in razoes) / len(razoes)), len(razoes)
+        if not (ra and rb):
+            continue
+        r = ra["bpp"] / rb["bpp"]
+        razoes.append(r)
+        if r < 0.999:
+            vit += 1
+        elif r > 1.001:
+            der += 1
+        else:
+            emp += 1
+    geo = math.exp(sum(math.log(x) for x in razoes) / len(razoes)) if razoes else None
+    return {"melhor": vit, "empate": emp, "pior": der, "n": len(razoes), "geo": geo}
 
 
-def imprimir(resultados):
+def imprimir(resultados, principal):
+    cods = codecs_resumo(principal)
     for alvo in TARGETS:
         print(f"\n=== alvo SSIM >= {alvo} ===")
-        print(f"{'imagem':10s}" + "".join(f"{c[:17]:>19s}" for c in CODECS_RESUMO))
+        print(f"{'imagem':14s}" + "".join(f"{c[:17]:>19s}" for c in cods))
         for nome, linhas in resultados.items():
             celulas = []
-            for codec in CODECS_RESUMO:
+            for codec in cods:
                 r = melhor_em(linhas, codec, alvo)
                 celulas.append(f"{r['bpp']:.3f}/{r['ssim']:.3f}" if r else "—")
-            print(f"{nome:10s}" + "".join(f"{c:>19s}" for c in celulas))
-        print("bpp / SSIM da melhor configuração por codec (— = alvo não atingido)")
-        for outro in ["JPEG", "WebP", "Q+xz", VERSION + " sem REF"]:
-            g, n = media_geo_razao(resultados, alvo, VERSION, outro)
-            txt = f"{g:.3f} (n={n})" if g is not None else "sem imagens comparáveis"
-            print(f"  média geométrica bpp {VERSION} / {outro}: {txt}")
+            print(f"{nome:14s}" + "".join(f"{c:>19s}" for c in celulas))
+        print("Contagem por imagem (principal contra a referência; melhor/empate/pior; média geométrica de bpp):")
+        for outro in [principal + " sem REF", "Q+xz", "JPEG", "WebP"]:
+            c = contagens(resultados, principal, outro, alvo)
+            if c["n"]:
+                print(f"  vs {outro:22s}: {c['melhor']}/{c['empate']}/{c['pior']} (n={c['n']}), geo={c['geo']:.3f}")
+            else:
+                print(f"  vs {outro:22s}: sem imagens comparáveis")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--images", default="", help="lista separada por vírgula; padrão: todas")
-    ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "results", f"lossy_{VERSION}.json"))
+    ap.add_argument("--modo", choices=["limiar", "rd"], default="limiar")
+    ap.add_argument("--conjunto", choices=["naturais", "estruturadas"], default="naturais")
+    ap.add_argument("--images", default="", help="lista separada por vírgula; padrão: todas do conjunto")
+    ap.add_argument("--out", default="")
     args = ap.parse_args()
-    imagens = load_images()
+    principal = VERSAO_POR_MODO[args.modo]
+    imagens = load_images(args.conjunto)
     if args.images:
-        escolhidas = args.images.split(",")
-        imagens = {k: imagens[k] for k in escolhidas}
+        imagens = {k: imagens[k] for k in args.images.split(",")}
     resultados = {}
     for nome, img in imagens.items():
         t0 = time.time()
-        resultados[nome] = rodar_imagem(img)
+        resultados[nome] = rodar_imagem(img, args.modo)
         print(f"{nome}: {img.shape}, {len(resultados[nome])} pontos, {time.time() - t0:.1f} s", file=sys.stderr)
-    imprimir(resultados)
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as f:
+    imprimir(resultados, principal)
+    out = args.out or os.path.join(os.path.dirname(__file__), "results", f"lossy_{principal}_{args.conjunto}.json")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
         json.dump(
-            {"versao": VERSION, "alvos": TARGETS, "resultados": resultados, "resumo": resumir(resultados)},
+            {
+                "versao": principal,
+                "conjunto": args.conjunto,
+                "alvos": TARGETS,
+                "resultados": resultados,
+                "resumo": resumir(resultados, principal),
+            },
             f,
             ensure_ascii=False,
             indent=1,
         )
-    print(f"\nJSON: {args.out}", file=sys.stderr)
+    print(f"\nJSON: {out}", file=sys.stderr)
 
 
 if __name__ == "__main__":

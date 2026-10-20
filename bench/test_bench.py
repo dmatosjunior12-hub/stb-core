@@ -6,6 +6,8 @@ Execute:  python3 -m unittest discover -s bench -v
 import random
 import unittest
 
+import numpy as np
+
 import stb_codec
 import stb_vm
 
@@ -607,6 +609,30 @@ class LossyTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=f"prefixo de {n} bytes foi aceito"):
                 exp_lossy.decode(blob[:n])
 
+    def test_rd_decoder_matches_encoder_reconstruction(self):
+        import numpy as np
+
+        img = self._img()
+        for q in (1, 8):
+            for lam in (100, 3000, 30000):
+                for usar_ref in (True, False):
+                    blob, rec, _ = exp_lossy.encode(img, q, usar_ref=usar_ref, lam=lam)
+                    self.assertTrue(np.array_equal(exp_lossy.decode(blob), rec), (q, lam, usar_ref))
+
+    def test_structured_images_are_deterministic_and_aligned(self):
+        import numpy as np
+
+        from synth_structured import carregar_estruturadas
+
+        a = carregar_estruturadas()
+        b = carregar_estruturadas()
+        self.assertEqual(set(a), {"grafico_linha", "grafico_barras", "documento", "tabela", "interface", "diagrama"})
+        for nome in a:
+            self.assertEqual(a[nome].dtype, np.uint8)
+            self.assertEqual(a[nome].shape, (512, 512))
+            self.assertEqual(a[nome].shape[0] % 8, 0)
+            self.assertTrue(np.array_equal(a[nome], b[nome]), nome)
+
     def test_qxz_roundtrip(self):
         import numpy as np
 
@@ -614,6 +640,65 @@ class LossyTests(unittest.TestCase):
         for q in (1, 2, 8):
             blob, rec = exp_lossy.encode_qxz(img, q)
             self.assertTrue(np.array_equal(exp_lossy.decode_qxz(blob), rec))
+
+
+class RedeTests(unittest.TestCase):
+    """Opção B: códigos de símbolo de 6 bits e simulador de transporte (exp_rede.py)."""
+
+    def test_sec_code_corrects_every_single_flip(self):
+        import exp_rede as er
+
+        for c in er.CODIGO_SEC:
+            for bit in range(6):
+                recebido = int(c) ^ (1 << bit)
+                dec = er.CODIGO_SEC[int(np.argmin(er.POP[recebido ^ er.CODIGO_SEC]))]
+                self.assertEqual(int(dec), int(c))
+
+    def test_even_parity_detects_every_single_flip(self):
+        import exp_rede as er
+
+        for c in er.PARES:
+            for bit in range(6):
+                self.assertEqual(er.POP[int(c) ^ (1 << bit)] % 2, 1)
+
+    def test_grec_decoder_maps_data_words_to_themselves(self):
+        import exp_rede as er
+
+        self.assertTrue(np.array_equal(er.TABELA_GREC[:48], np.arange(48)))
+        self.assertTrue(np.all(er.TABELA_GREC < 48))
+
+    def test_pair_bound_for_48_words(self):
+        import exp_rede as er
+
+        pares, contidos = er.limite_par_hipercubo()
+        self.assertEqual((pares, contidos), (32, 16))
+
+    def test_symbol_error_is_zero_without_noise(self):
+        import exp_rede as er
+
+        r = er.simular_simbolos(0.0, 2000, np.random.default_rng(1))
+        for v in r.values():
+            self.assertEqual(v["erro"], 0.0)
+            self.assertEqual(v["apagamento"], 0.0)
+
+    def test_arq_without_loss_takes_exact_time(self):
+        import exp_rede as er
+
+        # Sem perda, o último pacote é enviado no slot K-1 e chega RTT/2 depois.
+        self.assertEqual(er.tempo_arq(100, 0.0, 10, 50, np.random.default_rng(0)), 99 + 5)
+
+    def test_arq_time_grows_with_loss(self):
+        import exp_rede as er
+
+        rng = np.random.default_rng(3)
+        t0 = er.tempo_arq(500, 0.0, 20, 200, rng)
+        t1 = er.tempo_arq(500, 0.2, 20, 200, rng)
+        self.assertGreater(t1, t0)
+
+    def test_fountain_formula(self):
+        import exp_rede as er
+
+        self.assertAlmostEqual(er.tempo_fountain(1000, 0.0, 10), 1000 * 1.02 + 5)
 
 
 if __name__ == "__main__":
