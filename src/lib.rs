@@ -1138,28 +1138,33 @@ mod tests {
         let result = transmit(unit, &GeneLibrary::new());
         assert!(matches!(result, Err(VmError::Custom(_))));
     }
-}
 
-fn main() -> Result<(), VmError> {
-    println!("STB-Core v0.2 – Release Candidate (todas as correções aplicadas)");
-    let ast = Instruction::Seq(vec![
-        Instruction::Def {
-            id: "greeting".to_string(),
-            data: b"Hello STB! ".to_vec(),
-        },
-        Instruction::Rpt {
-            count: 3,
-            body: Box::new(Instruction::Ref {
-                id: "greeting".to_string(),
-            }),
-        },
-        Instruction::Ale { seed: 123, len: 2 },
-        Instruction::Stp,
-    ]);
-    let bytecode = Compiler::compile(&ast)?;
-    println!("Bytecode size: {} bytes", bytecode.bytes.len());
-    let mut vm = STBVM::new(GeneLibrary::new());
-    let out = vm.execute_bytecode(&bytecode)?;
-    println!("Output: {:?}", String::from_utf8_lossy(&out));
-    Ok(())
+    #[test]
+    fn test_residual_roundtrip_restores_bytes() {
+        let data: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let packed = compress_residual(&data, 3);
+        assert_eq!(decompress_residual(&packed), data);
+    }
+
+    #[test]
+    fn test_residual_roundtrip_empty() {
+        let packed = compress_residual(&[], 3);
+        assert_eq!(decompress_residual(&packed), Vec::<u8>::new());
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn test_residual_compresses_redundant_data() {
+        let data = vec![b'A'; 10_000];
+        let packed = compress_residual(&data, 3);
+        assert!(packed.len() < data.len() / 10, "packed = {} bytes", packed.len());
+    }
+
+    #[cfg(not(feature = "zstd"))]
+    #[test]
+    fn test_residual_is_passthrough_without_zstd() {
+        let data = b"abc".to_vec();
+        assert_eq!(compress_residual(&data, 3), data);
+        assert_eq!(decompress_residual(&data), data);
+    }
 }
