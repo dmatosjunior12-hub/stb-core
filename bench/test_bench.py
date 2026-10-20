@@ -553,5 +553,68 @@ class StreamFormatTests(unittest.TestCase):
         self.assertEqual(silent, 0)
 
 
+try:
+    import exp_lossy  # precisa de numpy, Pillow e scikit-image
+except ImportError:  # pragma: no cover - ambiente sem as dependências do experimento
+    exp_lossy = None
+
+
+@unittest.skipIf(exp_lossy is None, "exp_lossy requer Pillow e scikit-image")
+class LossyTests(unittest.TestCase):
+    """Codec com perda stb-lossy-v1 (exp_lossy.py)."""
+
+    def _img(self):
+        import numpy as np
+
+        rng = np.random.default_rng(1)
+        img = np.zeros((32, 48), np.uint8)
+        img[:, :16] = 100  # região plana
+        img[:, 16:32] = rng.integers(0, 256, (32, 16))  # ruído (sem gene)
+        img[:, 32:] = np.tile(np.arange(16, dtype=np.uint8) * 8, (32, 1))  # gradiente
+        img[8:16, 16:32] = img[0:8, 0:16]  # bloco repetido (REF)
+        return img
+
+    def test_decoder_matches_encoder_reconstruction(self):
+        import numpy as np
+
+        img = self._img()
+        for q in (1, 4, 16):
+            for tau in (0.9999, 0.9, 0.5):
+                for usar_ref in (True, False):
+                    blob, rec, _ = exp_lossy.encode(img, q, tau, usar_ref)
+                    self.assertTrue(np.array_equal(exp_lossy.decode(blob), rec), (q, tau, usar_ref))
+
+    def test_no_genes_and_q1_is_exact(self):
+        import numpy as np
+
+        img = self._img()
+        blob, rec, contagem = exp_lossy.encode(img, 1, 2.0, True)  # limiar impossível: só RES
+        self.assertEqual(contagem, [0, 0, 0, 32 * 48 // 64])
+        self.assertTrue(np.array_equal(rec, img))
+        self.assertTrue(np.array_equal(exp_lossy.decode(blob), img))
+
+    def test_constant_image_uses_flat_only(self):
+        import numpy as np
+
+        img = np.full((16, 16), 77, np.uint8)
+        blob, rec, contagem = exp_lossy.encode(img, 8, 0.9999, True)
+        self.assertEqual(contagem, [4, 0, 0, 0])
+        self.assertTrue(np.array_equal(exp_lossy.decode(blob), img))
+
+    def test_every_truncation_is_rejected(self):
+        blob, _, _ = exp_lossy.encode(self._img(), 4, 0.9, True)
+        for n in range(len(blob)):
+            with self.assertRaises(ValueError, msg=f"prefixo de {n} bytes foi aceito"):
+                exp_lossy.decode(blob[:n])
+
+    def test_qxz_roundtrip(self):
+        import numpy as np
+
+        img = self._img()
+        for q in (1, 2, 8):
+            blob, rec = exp_lossy.encode_qxz(img, q)
+            self.assertTrue(np.array_equal(exp_lossy.decode_qxz(blob), rec))
+
+
 if __name__ == "__main__":
     unittest.main()
