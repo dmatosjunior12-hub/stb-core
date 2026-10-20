@@ -787,21 +787,30 @@ pub fn transmit(unit: TransmissionUnit, library: &GeneLibrary) -> Result<Vec<u8>
 // Compressão residual (zstd opcional)
 // ============================================================================
 
+/// Comprime o resíduo. Falha de compressão é erro: nunca devolve os bytes crus em silêncio.
 #[cfg(feature = "zstd")]
-pub fn compress_residual(data: &[u8], level: i32) -> Vec<u8> {
-    encode_all(data, level).unwrap_or_else(|_| data.to_vec())
+pub fn compress_residual(data: &[u8], level: i32) -> Result<Vec<u8>, VmError> {
+    encode_all(data, level)
+        .map_err(|e| VmError::Custom(format!("compressão residual falhou: {e}")))
 }
+
+/// Descomprime o resíduo. Entrada inválida é erro: nunca devolve a entrada crua em silêncio.
 #[cfg(feature = "zstd")]
-pub fn decompress_residual(data: &[u8]) -> Vec<u8> {
-    decode_all(data).unwrap_or_else(|_| data.to_vec())
+pub fn decompress_residual(data: &[u8]) -> Result<Vec<u8>, VmError> {
+    decode_all(data)
+        .map_err(|e| VmError::Custom(format!("descompressão residual falhou: {e}")))
 }
+
+/// Sem a feature `zstd` o resíduo é armazenado sem compressão (identidade).
+/// Um resíduo gerado com `zstd` não pode ser lido por este build.
 #[cfg(not(feature = "zstd"))]
-pub fn compress_residual(data: &[u8], _level: i32) -> Vec<u8> {
-    data.to_vec()
+pub fn compress_residual(data: &[u8], _level: i32) -> Result<Vec<u8>, VmError> {
+    Ok(data.to_vec())
 }
+
 #[cfg(not(feature = "zstd"))]
-pub fn decompress_residual(data: &[u8]) -> Vec<u8> {
-    data.to_vec()
+pub fn decompress_residual(data: &[u8]) -> Result<Vec<u8>, VmError> {
+    Ok(data.to_vec())
 }
 
 // ============================================================================
@@ -1140,31 +1149,53 @@ mod tests {
     }
 
     #[test]
-    fn test_residual_roundtrip_restores_bytes() {
+    fn test_residual_roundtrip_restores_bytes() -> Result<(), VmError> {
         let data: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
-        let packed = compress_residual(&data, 3);
-        assert_eq!(decompress_residual(&packed), data);
+        let packed = compress_residual(&data, 3)?;
+        assert_eq!(decompress_residual(&packed)?, data);
+        Ok(())
     }
 
     #[test]
-    fn test_residual_roundtrip_empty() {
-        let packed = compress_residual(&[], 3);
-        assert_eq!(decompress_residual(&packed), Vec::<u8>::new());
+    fn test_residual_roundtrip_empty() -> Result<(), VmError> {
+        let packed = compress_residual(&[], 3)?;
+        assert_eq!(decompress_residual(&packed)?, Vec::<u8>::new());
+        Ok(())
     }
 
     #[cfg(feature = "zstd")]
     #[test]
-    fn test_residual_compresses_redundant_data() {
+    fn test_residual_compresses_redundant_data() -> Result<(), VmError> {
         let data = vec![b'A'; 10_000];
-        let packed = compress_residual(&data, 3);
+        let packed = compress_residual(&data, 3)?;
         assert!(packed.len() < data.len() / 10, "packed = {} bytes", packed.len());
+        Ok(())
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn test_residual_corrupt_input_is_error() {
+        // Não é quadro zstd: a descompressão deve falhar, nunca devolver a entrada crua.
+        let garbage = b"isto nao e zstd".to_vec();
+        assert!(matches!(decompress_residual(&garbage), Err(VmError::Custom(_))));
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn test_residual_truncated_frame_is_error() -> Result<(), VmError> {
+        let data = vec![b'Z'; 5000];
+        let mut packed = compress_residual(&data, 3)?;
+        packed.truncate(packed.len() / 2);
+        assert!(matches!(decompress_residual(&packed), Err(VmError::Custom(_))));
+        Ok(())
     }
 
     #[cfg(not(feature = "zstd"))]
     #[test]
-    fn test_residual_is_passthrough_without_zstd() {
+    fn test_residual_is_passthrough_without_zstd() -> Result<(), VmError> {
         let data = b"abc".to_vec();
-        assert_eq!(compress_residual(&data, 3), data);
-        assert_eq!(decompress_residual(&data), data);
+        assert_eq!(compress_residual(&data, 3)?, data);
+        assert_eq!(decompress_residual(&data)?, data);
+        Ok(())
     }
 }
