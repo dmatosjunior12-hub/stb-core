@@ -311,5 +311,87 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(pos, len(data), parser)
 
 
+class RangeCoderTests(unittest.TestCase):
+    """Codificador aritmético adaptativo (rc.py) e codificação de tokens (token_coder.py)."""
+
+    def test_bits_roundtrip_and_skewed_source_compresses(self):
+        import rc
+        rnd = random.Random(1)
+        bits = [int(rnd.random() < 0.05) for _ in range(5000)]
+        slot = [rc.PROB_INIT, 0]
+        enc = rc.Encoder()
+        for b in bits:
+            enc.bit(slot, b)
+        buf = enc.finish()
+        slot = [rc.PROB_INIT, 0]
+        dec = rc.Decoder(buf)
+        self.assertEqual([dec.bit(slot) for _ in bits], bits)
+        self.assertLess(len(buf), len(bits) // 8 // 2)  # fonte com p=0.05 cabe em bem menos que 1 bit/bit
+
+    def test_int_and_tree_models_roundtrip(self):
+        import rc
+        values = [0, 1, 2, 3, 7, 8, 1000, 65535, 10**6, 2**31 - 1]
+        ints = rc.IntModel()
+        tree = rc.TreeModel(12)
+        enc = rc.Encoder()
+        for v in values:
+            ints.encode(enc, v)
+            tree.encode(enc, v % 4096)
+        buf = enc.finish()
+        ints, tree, dec = rc.IntModel(), rc.TreeModel(12), rc.Decoder(buf)
+        out = []
+        for _ in values:
+            out.append(ints.decode(dec))
+            out.append(tree.decode(dec))
+        self.assertEqual(out[0::2], values)
+        self.assertEqual(out[1::2], [v % 4096 for v in values])
+
+    def test_int_model_rejects_negative(self):
+        import rc
+        with self.assertRaises(ValueError):
+            rc.IntModel().encode(rc.Encoder(), -1)
+
+    def test_truncated_stream_raises(self):
+        import rc
+        import token_coder
+        import stb_v2
+        buf = token_coder.encode_tokens([(stb_v2.T_LIT, 5), (stb_v2.T_STP,)], b"hello", 0)
+        with self.assertRaises(ValueError):
+            token_coder.decode_tokens(buf[:-3], 0)
+        with self.assertRaises(ValueError):
+            rc.Decoder(b"").bit([rc.PROB_INIT, 0])
+
+    def test_token_roundtrip_with_genes_copies_and_rpt(self):
+        import token_coder
+        import stb_v2
+        genes = [b"GENE-SEQUENCE-ABCDEFGH", b"another gene body here!", b"x" * 40]
+        lib = lib_from(genes)
+        data = (genes[0] + b"-" + genes[1] + genes[1] + genes[1] + b"0123456789" * 9
+                + bytes(range(60)) + genes[2])
+        for parser in stb_v2.PARSERS:
+            for allow_copy in (True, False):
+                with self.subTest(parser=parser, allow_copy=allow_copy):
+                    toks, R = stb_v2.tokenize(data, lib, parser, allow_copy)
+                    blob = token_coder.encode_tokens(toks, R, len(genes))
+                    self.assertEqual(token_coder.decode_tokens(blob, len(genes)), (toks, R))
+                    prog = stb_v2.bytecode_from_tokens(toks, lib)
+                    self.assertEqual(stb_vm.execute(prog, lib.payload, residue=R), data)
+
+    def test_no_library_roundtrip(self):
+        import token_coder
+        import stb_v2
+        data = b"abcabcabc" * 30 + bytes(range(256))
+        empty = lib_from([])
+        toks, R = stb_v2.tokenize(data, empty, "greedy", True)
+        blob = token_coder.encode_tokens(toks, R, 0)
+        self.assertEqual(token_coder.decode_tokens(blob, 0), (toks, R))
+
+    def test_unconsumed_literals_rejected(self):
+        import token_coder
+        import stb_v2
+        with self.assertRaises(ValueError):
+            token_coder.encode_tokens([(stb_v2.T_LIT, 2), (stb_v2.T_STP,)], b"abc", 0)
+
+
 if __name__ == "__main__":
     unittest.main()
