@@ -26,7 +26,9 @@ Source X
 | Limit | Value | Rationale |
 |-------|-------|-----------|
 | Max output | 64 MB | OOM protection |
-| Max loop count | 1,000,000 | DoS protection |
+| Max loop count | 1,000,000 per RPT | DoS protection (local) |
+| Max VM steps | 50,000,000 global | DoS protection (nested loops) |
+| Static bytecode validation | before execution | Rejects missing STP, unbalanced RPT/RPTEND, ALE seed 0 |
 | Gene signature | SHA256 | Integrity on load |
 | Bytecode checksum | SHA256 | Integrity on transmit |
 

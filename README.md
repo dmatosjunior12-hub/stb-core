@@ -63,14 +63,23 @@ let mut vm = STBVM::new(GeneLibrary::new());
 let output = vm.execute_bytecode(&bytecode).unwrap();
 ```
 
+## Benchmark
+
+`bench/` contém um benchmark em andamento que compara codificações baseadas em genes com
+DEFLATE, xz e zstd em dados reais. Os resultados ainda não foram publicados neste README.
+Ver [`bench/README.md`](bench/README.md) para como rodar e quais são as limitações conhecidas.
+
 ## Security limits
 
 | Limit | Value |
 |-------|-------|
 | Max output size | 64 MB |
-| Max loop iterations | 1,000,000 |
-| Gene signature validation | SHA256 |
-| Bytecode integrity | SHA256 (capsid) |
+| Max loop iterations | 1,000,000 **por RPT** (não global) |
+| Max VM steps | 50,000,000 **global** (inclui RPT/RPTEND) |
+| Bytecode validation | estática, antes da execução: opcodes válidos, RPT/RPTEND balanceados, `STP` como última instrução |
+| ALE seed | não pode ser `0` (estado xorshift absorvente) |
+| Gene signature validation | SHA256 (detecta corrupção, **não** adulteração: o hash fica no mesmo arquivo) |
+| Bytecode integrity | SHA256 (capsid); bytecode com checksum inválido **nunca** é executado |
 
 ## Development note
 

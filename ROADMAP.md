@@ -12,13 +12,19 @@
 ## v0.3 (planned)
 - [ ] Iterative `skip_instruction` (eliminate recursion stack risk)
 - [ ] CSPRNG seed for ALE (replace predictable XorShift)
-- [ ] MAX_VM_STEPS global execution limit
+- [x] MAX_VM_STEPS global execution limit (50M passos)
+- [x] Validação estática do bytecode antes da execução (STP final, RPT/RPTEND balanceados)
+- [x] Política `Partial` não executa mais bytecode com checksum inválido
 - [ ] Expanded test suite with corpus fixtures
 
 ## v0.4 (planned)
 - [ ] Content-defined chunking backend (FastCDC integration)
-- [ ] Benchmark framework against DEFLATE / zstd / H.264 baselines
-- [ ] Measurement of ρ_STB on real data
+- [x] Benchmark framework against DEFLATE / zstd (`bench/`); H.264 ainda pendente
+- [ ] Baseline de vídeo (H.264) no benchmark
+- [ ] Avaliar parsers (guloso, lazy, ótimo) e a codificação dos fluxos do STB-v2 além do teste atual (ver `bench/compare_parsers.py`, `bench/gamma_effect.py`)
+- [ ] Decidir se COPY e a separação em fluxos entram no formato Rust (hoje são só do benchmark)
+- [x] Measurement of ρ_STB on real data (logs, código, CSV, .pyc; ver `bench/RESULTS.md`)
+- [ ] Encoder com REF a bytes já emitidos (in-file), a maior lacuna medida
 
 ## v1.0 (future)
 - [ ] End-to-end STB prototype on a real domain (video or text)

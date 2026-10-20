@@ -310,6 +310,11 @@ impl Compiler {
                 }
             }
             Instruction::Ale { seed, len } => {
+                if *seed == 0 {
+                    return Err(VmError::Custom(
+                        "ALE seed 0 é degenerada (estado xorshift 0 é absorvente)".into(),
+                    ));
+                }
                 out.push(Opcode::Ale as u8);
                 out.extend_from_slice(&seed.to_le_bytes());
                 let len_u32 = u32::try_from(*len)
@@ -343,10 +348,15 @@ pub enum TolerancePolicy {
     Semantic,
 }
 
+/// Política aplicada quando o checksum do bytecode não confere.
+/// Em TODAS as políticas, bytecode com checksum inválido nunca é executado.
 #[derive(Debug, Clone)]
 pub enum FallbackPolicy {
+    /// Fallback clássico: ainda NÃO implementado; retorna erro.
     Classical,
+    /// Aborta a transmissão com erro.
     Abort,
+    /// Antes executava o bytecode adulterado; agora recusa a execução (retorna erro).
     Partial,
 }
 
@@ -394,7 +404,11 @@ pub struct TransmissionUnit {
 // ============================================================================
 
 const MAX_OUTPUT_SIZE: usize = 64 * 1024 * 1024; // 64 MB
-const MAX_LOOP_COUNT: u32 = 1_000_000; // 1 milhão de iterações
+const MAX_LOOP_COUNT: u32 = 1_000_000; // 1 milhão de iterações POR RPT (não global)
+/// Limite global de instruções despachadas por execução (inclui RPT e RPTEND).
+/// Sem ele, RPTs aninhados com corpo vazio executam count_externo × count_interno passos
+/// sem produzir saída, e o limite de saída nunca dispara.
+const MAX_VM_STEPS: usize = 50_000_000;
 
 #[derive(Debug, PartialEq)]
 pub enum VmError {
@@ -541,6 +555,7 @@ impl STBVM {
     }
 
     pub fn execute_bytecode(&mut self, bytecode: &BytecodeProgram) -> Result<Vec<u8>, VmError> {
+        validate_bytecode(bytecode)?;
         let mut pc = 0;
         let bytes = &bytecode.bytes;
         self.output.clear();
@@ -553,6 +568,12 @@ impl STBVM {
             let op = bytes[pc];
             pc += 1;
             self.executed_instr += 1;
+            if self.executed_instr > MAX_VM_STEPS {
+                return Err(VmError::Custom(format!(
+                    "Limite de passos da VM excedido ({})",
+                    MAX_VM_STEPS
+                )));
+            }
 
             match op {
                 x if x == Opcode::Def as u8 => {
@@ -669,25 +690,94 @@ impl STBVM {
 }
 
 // ============================================================================
+// Verificação estática do bytecode (N1 – sintaxe), executada antes de qualquer instrução.
+// Garante: opcodes válidos, operandos dentro dos limites, RPT/RPTEND balanceados,
+// contagens e tamanhos dentro dos limites, semente ALE não nula e STP como última instrução.
+// ============================================================================
+
+pub fn validate_bytecode(program: &BytecodeProgram) -> Result<(), VmError> {
+    let bytes = &program.bytes;
+    let mut pc: usize = 0;
+    let mut depth: usize = 0;
+    let mut halted = false;
+
+    while pc < bytes.len() {
+        if halted {
+            return Err(VmError::Custom("instruções após STP".to_string()));
+        }
+        let op = bytes[pc];
+        pc += 1;
+        match op {
+            x if x == Opcode::Def as u8 => {
+                STBVM::read_string(bytes, &mut pc)?;
+                STBVM::read_bytes(bytes, &mut pc)?;
+            }
+            x if x == Opcode::Ref as u8 => {
+                STBVM::read_string(bytes, &mut pc)?;
+            }
+            x if x == Opcode::Rpt as u8 => {
+                let count = STBVM::read_u32(bytes, &mut pc)?;
+                if count > MAX_LOOP_COUNT {
+                    return Err(VmError::Custom(format!(
+                        "Loop count {} exceeds limit {}",
+                        count, MAX_LOOP_COUNT
+                    )));
+                }
+                depth += 1;
+            }
+            x if x == Opcode::RptEnd as u8 => {
+                if depth == 0 {
+                    return Err(VmError::LoopMismatch);
+                }
+                depth -= 1;
+            }
+            x if x == Opcode::Ale as u8 => {
+                let seed = STBVM::read_u64(bytes, &mut pc)?;
+                let len = STBVM::read_u32(bytes, &mut pc)? as usize;
+                if seed == 0 {
+                    return Err(VmError::Custom(
+                        "ALE seed 0 é degenerada (estado xorshift 0 é absorvente)".to_string(),
+                    ));
+                }
+                if len > MAX_OUTPUT_SIZE {
+                    return Err(VmError::Custom("Ale length exceeds output limit".to_string()));
+                }
+            }
+            x if x == Opcode::Err as u8 => {
+                STBVM::read_string(bytes, &mut pc)?;
+            }
+            x if x == Opcode::Stp as u8 => {
+                if depth != 0 {
+                    return Err(VmError::LoopMismatch);
+                }
+                halted = true;
+            }
+            _ => return Err(VmError::InvalidOpcode(op)),
+        }
+    }
+
+    if !halted {
+        return Err(VmError::Custom("programa não termina com STP".to_string()));
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Transmissão (com checksum)
 // ============================================================================
 
 pub fn transmit(unit: TransmissionUnit, library: &GeneLibrary) -> Result<Vec<u8>, VmError> {
     let program_checksum = Capsid::compute_checksum(&unit.bytecode.bytes);
     if program_checksum != unit.capsid.bytecode_checksum {
-        return match unit.capsid.fallback {
-            FallbackPolicy::Classical => Err(VmError::Custom(
-                "Checksum mismatch – fallback clássico".to_string(),
-            )),
-            FallbackPolicy::Abort => {
-                Err(VmError::Custom("Checksum mismatch – abortado".to_string()))
-            }
+        // Bytecode não verificado nunca é executado, independentemente da política.
+        let msg = match unit.capsid.fallback {
+            FallbackPolicy::Classical => "Checksum mismatch – fallback clássico não implementado",
+            FallbackPolicy::Abort => "Checksum mismatch – abortado",
             FallbackPolicy::Partial => {
-                eprintln!("⚠️ Checksum mismatch, executando mesmo assim (partial)");
-                let mut vm = STBVM::new(library.clone());
-                vm.execute_bytecode(&unit.bytecode)
+                "Checksum mismatch – execução parcial recusada (bytecode não verificado)"
             }
         };
+        return Err(VmError::Custom(msg.to_string()));
     }
     let mut vm = STBVM::new(library.clone());
     vm.execute_bytecode(&unit.bytecode)
@@ -945,6 +1035,108 @@ mod tests {
         let result = vm.execute_bytecode(&bytecode);
         assert!(matches!(result, Err(VmError::GeneNotFound(_))));
         Ok(())
+    }
+
+    #[test]
+    fn test_nested_empty_loops_hit_global_step_limit() {
+        // Dois RPTs de 10^6 com corpo vazio: sem saída, só o limite global de passos os detém.
+        let ast = Instruction::Seq(vec![
+            Instruction::Rpt {
+                count: MAX_LOOP_COUNT as usize,
+                body: Box::new(Instruction::Rpt {
+                    count: MAX_LOOP_COUNT as usize,
+                    body: Box::new(Instruction::Seq(vec![])),
+                }),
+            },
+            Instruction::Stp,
+        ]);
+        let bytecode = Compiler::compile(&ast).unwrap();
+        let mut vm = STBVM::new(GeneLibrary::new());
+        let result = vm.execute_bytecode(&bytecode);
+        assert!(matches!(result, Err(VmError::Custom(_))));
+    }
+
+    #[test]
+    fn test_ale_zero_seed_rejected() {
+        let ast = Instruction::Seq(vec![Instruction::Ale { seed: 0, len: 4 }, Instruction::Stp]);
+        assert!(Compiler::compile(&ast).is_err());
+
+        // Bytecode escrito à mão com semente 0 também é recusado pela VM.
+        let bytecode = BytecodeProgram {
+            bytes: vec![
+                Opcode::Ale as u8,
+                0, 0, 0, 0, 0, 0, 0, 0, // seed = 0 (u64 LE)
+                4, 0, 0, 0,             // len = 4 (u32 LE)
+                Opcode::Stp as u8,
+            ],
+        };
+        let mut vm = STBVM::new(GeneLibrary::new());
+        assert!(matches!(vm.execute_bytecode(&bytecode), Err(VmError::Custom(_))));
+    }
+
+    #[test]
+    fn test_missing_stp_rejected() {
+        // DEF "a" = "x", sem STP: antes retornava Ok(vazio) silenciosamente.
+        let bytecode = BytecodeProgram {
+            bytes: vec![Opcode::Def as u8, 1, 0, b'a', 1, 0, 0, 0, b'x'],
+        };
+        let mut vm = STBVM::new(GeneLibrary::new());
+        assert!(matches!(vm.execute_bytecode(&bytecode), Err(VmError::Custom(_))));
+    }
+
+    #[test]
+    fn test_unbalanced_loops_rejected() {
+        let unmatched_end = BytecodeProgram {
+            bytes: vec![Opcode::RptEnd as u8, Opcode::Stp as u8],
+        };
+        let mut vm = STBVM::new(GeneLibrary::new());
+        assert_eq!(vm.execute_bytecode(&unmatched_end), Err(VmError::LoopMismatch));
+
+        let unclosed_rpt = BytecodeProgram {
+            bytes: vec![Opcode::Rpt as u8, 2, 0, 0, 0, Opcode::Stp as u8],
+        };
+        let mut vm = STBVM::new(GeneLibrary::new());
+        assert_eq!(vm.execute_bytecode(&unclosed_rpt), Err(VmError::LoopMismatch));
+    }
+
+    #[test]
+    fn test_instructions_after_stp_rejected() {
+        let bytecode = BytecodeProgram {
+            bytes: vec![Opcode::Stp as u8, Opcode::Stp as u8],
+        };
+        let mut vm = STBVM::new(GeneLibrary::new());
+        assert!(matches!(vm.execute_bytecode(&bytecode), Err(VmError::Custom(_))));
+    }
+
+    #[test]
+    fn test_partial_refuses_tampered_bytecode() {
+        let ast = Instruction::Seq(vec![
+            Instruction::Def {
+                id: "msg".to_string(),
+                data: b"OK".to_vec(),
+            },
+            Instruction::Ref {
+                id: "msg".to_string(),
+            },
+            Instruction::Stp,
+        ]);
+        let bytecode = Compiler::compile(&ast).unwrap();
+        let mut capsid = Capsid::from_bytecode("test", &bytecode);
+        capsid.fallback = FallbackPolicy::Partial;
+
+        // Adultera um byte do REF final (sem recalcular o checksum).
+        let mut tampered = bytecode.clone();
+        let idx = tampered.bytes.len() - 2;
+        tampered.bytes[idx] ^= 0x01;
+
+        let unit = TransmissionUnit {
+            capsid,
+            used_genes: vec![],
+            bytecode: tampered,
+            compressed_residual: vec![],
+        };
+        let result = transmit(unit, &GeneLibrary::new());
+        assert!(matches!(result, Err(VmError::Custom(_))));
     }
 }
 
